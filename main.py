@@ -161,13 +161,22 @@ class StatusMessage:
 async def send_status(message: Message, text: str = "🔄 Загрузка...") -> StatusMessage:
     """Отправить статусное сообщение с возможностью редактирования"""
     result = await message.answer(text)
-    # В vkbottle 4.x answer возвращает список MessagesSendUserIdsResponseItem
-    if hasattr(result, '__iter__') and not isinstance(result, str):
-        result = list(result)[0] if result else None
-    if result and hasattr(result, 'message_id'):
-        return StatusMessage(message.ctx_api, message.peer_id, result.message_id)
-    # Fallback - возвращаем ID из ответа
-    return StatusMessage(message.ctx_api, message.peer_id, result.conversation_message_id if result else 0)
+    # В vkbottle 4.x answer возвращает кортеж/список MessagesSendUserIdsResponseItem
+    msg_id = 0
+    if result:
+        # Если это итерируемый объект (список/кортеж)
+        if isinstance(result, (list, tuple)) and len(result) > 0:
+            item = result[0]
+            if hasattr(item, 'message_id'):
+                msg_id = item.message_id
+            elif hasattr(item, 'conversation_message_id'):
+                msg_id = item.conversation_message_id
+        # Если это одиночный объект
+        elif hasattr(result, 'message_id'):
+            msg_id = result.message_id
+        elif hasattr(result, 'conversation_message_id'):
+            msg_id = result.conversation_message_id
+    return StatusMessage(message.ctx_api, message.peer_id, msg_id)
 
 
 async def require_authentication(message: Message, user_config):
