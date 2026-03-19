@@ -26,7 +26,7 @@ def setup_logging() -> None:
             logging.FileHandler(config.data_dir / "bot.log", encoding="utf-8")
         ]
     )
-    logging.getLogger("vkbottle").setLevel(logging.WARNING)
+    logging.getLogger("vkbottle").setLevel(logging.DEBUG)  # Временно для отладки
 
 
 logger = logging.getLogger(__name__)
@@ -276,8 +276,9 @@ def main() -> None:
     setup_logging()
     logger.info("Starting Ruobr VK Bot v2.0")
 
-    bot = Bot(token=config.vk_token)
+    bot = Bot(token=config.vk_token, group_id=config.vk_group_id)
     labeler = bot.labeler
+    logger.info(f"Bot initialized for group_id={config.vk_group_id}")
 
     # ===== Команда /start =====
     @labeler.message(text="/start")
@@ -303,8 +304,10 @@ def main() -> None:
     # ===== Обработчик всех сообщений (для FSM) =====
     @labeler.message()
     async def handle_all_messages(message: Message):
+        logger.info(f"Received message: '{message.text}' from peer_id={message.peer_id}")
         current_state = await get_user_state(bot.state_dispenser, message.peer_id)
         text = message.text.strip() if message.text else ""
+        logger.info(f"Current state: {current_state}, text: '{text}'")
 
         # Проверка отмены
         if text in ["❌ Отмена", "/cancel", "◀️ Назад"]:
