@@ -276,9 +276,9 @@ def main() -> None:
     setup_logging()
     logger.info("Starting Ruobr VK Bot v2.0")
 
-    bot = Bot(token=config.vk_token, group_id=config.vk_group_id)
+    bot = Bot(token=config.vk_token)
     labeler = bot.labeler
-    logger.info(f"Bot initialized for group_id={config.vk_group_id}")
+    logger.info(f"Bot initialized")
 
     # ===== Команда /start =====
     @labeler.message(text="/start")
