@@ -358,6 +358,41 @@ async def handle_state_messages(message: Message):
         await handle_threshold_value_input(message, text)
         return
 
+    # Обработка выбора ребенка
+    if current_state and current_state.startswith("select_child:"):
+        action = current_state.split(":")[1]
+        await handle_child_selection(message, text, action)
+        return
+
+    # Обработка кнопок уведомлений
+    if text.startswith("💰 Баланс:"):
+        user_config = await get_user(message.peer_id)
+        if user_config is None:
+            user_config = await create_or_update_user(message.peer_id)
+        new_status = not user_config.enabled
+        await create_or_update_user(message.peer_id, enabled=new_status)
+        await message.answer(
+            f"🔔 Настройки уведомлений\n\n"
+            f"Баланс: {'✅ включено' if new_status else '❌ выключено'}\n\n"
+            "Нажмите для включения/выключения:",
+            keyboard=get_notification_keyboard(await get_user(message.peer_id))
+        )
+        return
+
+    if text.startswith("⭐ Оценки:"):
+        user_config = await get_user(message.peer_id)
+        if user_config is None:
+            user_config = await create_or_update_user(message.peer_id)
+        new_status = not user_config.marks_enabled
+        await create_or_update_user(message.peer_id, marks_enabled=new_status)
+        await message.answer(
+            f"🔔 Настройки уведомлений\n\n"
+            f"Оценки: {'✅ включено' if new_status else '❌ выключено'}\n\n"
+            "Нажмите для включения/выключения:",
+            keyboard=get_notification_keyboard(await get_user(message.peer_id))
+        )
+        return
+
 
 @bp.on.message(text="/cancel")
 @bp.on.message(text="❌ Отмена")
@@ -768,49 +803,3 @@ async def btn_notifications(message: Message):
         "Нажмите для включения/выключения:",
         keyboard=get_notification_keyboard(user_config)
     )
-
-
-@bp.on.message(text_startswith="💰 Баланс:")
-async def toggle_balance(message: Message):
-    user_config = await get_user(message.peer_id)
-    if user_config is None:
-        user_config = await create_or_update_user(message.peer_id)
-    
-    new_status = not user_config.enabled
-    await create_or_update_user(message.peer_id, enabled=new_status)
-    
-    await message.answer(
-        f"🔔 Настройки уведомлений\n\n"
-        f"Баланс: {'✅ включено' if new_status else '❌ выключено'}\n\n"
-        "Нажмите для включения/выключения:",
-        keyboard=get_notification_keyboard(await get_user(message.peer_id))
-    )
-
-
-@bp.on.message(text_startswith="⭐ Оценки:")
-async def toggle_marks(message: Message):
-    user_config = await get_user(message.peer_id)
-    if user_config is None:
-        user_config = await create_or_update_user(message.peer_id)
-    
-    new_status = not user_config.marks_enabled
-    await create_or_update_user(message.peer_id, marks_enabled=new_status)
-    
-    await message.answer(
-        f"🔔 Настройки уведомлений\n\n"
-        f"Оценки: {'✅ включено' if new_status else '❌ выключено'}\n\n"
-        "Нажмите для включения/выключения:",
-        keyboard=get_notification_keyboard(await get_user(message.peer_id))
-    )
-
-
-# Обработка выбора ребенка по текстовой кнопке
-@bp.on.message(text_startswith="👤")
-async def handle_child_button(message: Message):
-    """Обработка нажатия кнопки выбора ребенка"""
-    current_state = await get_user_state(message.peer_id)
-    text = message.text.strip()
-    
-    if current_state and current_state.startswith("select_child:"):
-        action = current_state.split(":")[1]
-        await handle_child_selection(message, text, action)
