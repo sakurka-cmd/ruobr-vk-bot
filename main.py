@@ -140,6 +140,36 @@ async def get_state_payload(dispenser, peer_id: int):
 
 # ===== Вспомогательные функции =====
 
+class StatusMessage:
+    """Обёртка для редактирования сообщений через API (vkbottle 4.x compatibility)"""
+    def __init__(self, api, peer_id: int, message_id: int):
+        self.api = api
+        self.peer_id = peer_id
+        self.message_id = message_id
+    
+    async def edit(self, text: str, keyboard: str = None):
+        params = {
+            "peer_id": self.peer_id,
+            "message_id": self.message_id,
+            "message": text
+        }
+        if keyboard:
+            params["keyboard"] = keyboard
+        await self.api.messages.edit(**params)
+
+
+async def send_status(message: Message, text: str = "🔄 Загрузка...") -> StatusMessage:
+    """Отправить статусное сообщение с возможностью редактирования"""
+    result = await message.answer(text)
+    # В vkbottle 4.x answer возвращает список MessagesSendUserIdsResponseItem
+    if hasattr(result, '__iter__') and not isinstance(result, str):
+        result = list(result)[0] if result else None
+    if result and hasattr(result, 'message_id'):
+        return StatusMessage(message.ctx_api, message.peer_id, result.message_id)
+    # Fallback - возвращаем ID из ответа
+    return StatusMessage(message.ctx_api, message.peer_id, result.conversation_message_id if result else 0)
+
+
 async def require_authentication(message: Message, user_config):
     if user_config is None:
         user_config = await get_user(message.peer_id)
@@ -158,7 +188,7 @@ async def require_authentication(message: Message, user_config):
 
 
 async def show_classmates(message: Message, login: str, password: str, child_index: int, child_name: str):
-    status_msg = await message.answer("🔄 Загрузка...")
+    status_msg = await send_status(message)
     try:
         classmates = await get_classmates_for_child(login, password, child_index)
         if not classmates:
@@ -201,7 +231,7 @@ async def show_classmates(message: Message, login: str, password: str, child_ind
 
 
 async def show_teachers(message: Message, login: str, password: str, child_index: int, child_name: str):
-    status_msg = await message.answer("🔄 Загрузка...")
+    status_msg = await send_status(message)
     try:
         guide = await get_guide_for_child(login, password, child_index)
         if not guide.teachers:
@@ -233,7 +263,7 @@ async def show_teachers(message: Message, login: str, password: str, child_index
 
 
 async def show_achievements(message: Message, login: str, password: str, child_index: int, child_name: str):
-    status_msg = await message.answer("🔄 Загрузка...")
+    status_msg = await send_status(message)
     try:
         achievements = await get_achievements_for_child(login, password, child_index)
         lines = [f"🏆 Достижения — {child_name}\n"]
@@ -347,7 +377,7 @@ def main() -> None:
                 await message.delete()
             except:
                 pass
-            status_msg = await message.answer("🔄 Проверка учётных данных...")
+            status_msg = await send_status(message, "🔄 Проверка учётных данных...")
             try:
                 children = await get_children_async(login, text)
                 if not children:
@@ -557,7 +587,7 @@ def main() -> None:
         if not result:
             return
         login, password, children = result
-        status_msg = await message.answer("🔄 Загрузка...")
+        status_msg = await send_status(message)
         try:
             food_info = await get_food_for_children(login, password, children)
             thresholds = await get_all_thresholds_for_peer(message.peer_id)
@@ -582,7 +612,7 @@ def main() -> None:
         if not result:
             return
         login, password, children = result
-        status_msg = await message.answer("🔄 Загрузка...")
+        status_msg = await send_status(message)
         try:
             today_str = date.today().strftime("%Y-%m-%d")
             food_info = await get_food_for_children(login, password, children)
@@ -626,7 +656,7 @@ def main() -> None:
         if not result:
             return
         login, password, children = result
-        status_msg = await message.answer("🔄 Загрузка...")
+        status_msg = await send_status(message)
         try:
             today = date.today()
             timetable = await get_timetable_for_children(login, password, children, today, today)
@@ -651,7 +681,7 @@ def main() -> None:
         if not result:
             return
         login, password, children = result
-        status_msg = await message.answer("🔄 Загрузка...")
+        status_msg = await send_status(message)
         try:
             tomorrow = date.today() + timedelta(days=1)
             timetable = await get_timetable_for_children(login, password, children, tomorrow, tomorrow)
@@ -676,7 +706,7 @@ def main() -> None:
         if not result:
             return
         login, password, children = result
-        status_msg = await message.answer("🔄 Загрузка...")
+        status_msg = await send_status(message)
         try:
             today = date.today()
             tomorrow = today + timedelta(days=1)
@@ -713,7 +743,7 @@ def main() -> None:
         if not result:
             return
         login, password, children = result
-        status_msg = await message.answer("🔄 Загрузка...")
+        status_msg = await send_status(message)
         try:
             today = date.today()
             timetable = await get_timetable_for_children(login, password, children, today, today)
