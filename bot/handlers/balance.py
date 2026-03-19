@@ -5,23 +5,23 @@ import logging
 from datetime import date
 from typing import Optional
 
-from vkbottle import Keyboard, KeyboardButtonColor, Text
-from vkbottle.bot import Blueprint, Message
+from vkbottle.bot import Message
 
 from ..config import config
 from ..database import (
-    get_user, get_child_threshold, set_child_threshold,
-    get_all_thresholds_for_peer, UserConfig
+    get_user, get_all_thresholds_for_peer, UserConfig
 )
-from ..states import ThresholdStates
 from ..services import (
-    Child, FoodInfo, get_children_async, get_food_for_children,
-    get_timetable_for_children, RuobrError, invalidate_user_cache
+    get_children_async, get_food_for_children,
+    RuobrError
 )
 from ..utils.formatters import (
     format_balance, format_food_visit, format_date, truncate_text
 )
-from .auth import get_main_keyboard, get_settings_keyboard, bp, set_user_state
+from .auth import (
+    get_main_keyboard, bp, set_user_state, get_cancel_keyboard,
+    ThresholdStates
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +64,9 @@ async def require_authentication(
 
 @bp.on.message(text="/balance")
 @bp.on.message(text="💰 Баланс питания")
-async def cmd_balance(message: Message):
+async def cmd_balance(message: Message, user_config: Optional[UserConfig] = None):
     """Показать баланс питания всех детей."""
-    result = await require_authentication(message, None)
+    result = await require_authentication(message, user_config)
     if result is None:
         return
 
@@ -75,6 +75,7 @@ async def cmd_balance(message: Message):
     status_msg = await message.answer("🔄 Загрузка информации о балансе...")
 
     try:
+        # Получаем информацию о питании
         food_info = await get_food_for_children(login, password, children)
         thresholds = await get_all_thresholds_for_peer(message.peer_id)
 
@@ -110,9 +111,9 @@ async def cmd_balance(message: Message):
 
 @bp.on.message(text="/foodtoday")
 @bp.on.message(text="🍽 Питание сегодня")
-async def cmd_foodtoday(message: Message):
+async def cmd_foodtoday(message: Message, user_config: Optional[UserConfig] = None):
     """Показать информацию о питании за сегодня."""
-    result = await require_authentication(message, None)
+    result = await require_authentication(message, user_config)
     if result is None:
         return
 
@@ -138,6 +139,7 @@ async def cmd_foodtoday(message: Message):
                 if visit.get("date") != today_str:
                     continue
 
+                # Проверяем, было ли подтверждённое питание
                 if not visit.get("ordered") and visit.get("state") != 30:
                     continue
 
@@ -165,9 +167,9 @@ async def cmd_foodtoday(message: Message):
 
 @bp.on.message(text="/set_threshold")
 @bp.on.message(text="💰 Порог баланса")
-async def cmd_set_threshold(message: Message):
+async def cmd_set_threshold(message: Message, user_config: Optional[UserConfig] = None):
     """Начало настройки порога баланса."""
-    result = await require_authentication(message, None)
+    result = await require_authentication(message, user_config)
     if result is None:
         return
 
@@ -184,13 +186,13 @@ async def cmd_set_threshold(message: Message):
             f"порог {threshold:.0f} ₽"
         )
 
-    lines.append("\n📝 Ответьте номером ребёнка.")
+    lines.append("\n📝 Введите номер ребёнка.")
 
     # Сохраняем данные детей в состоянии
     await set_user_state(
         message.peer_id,
-        ThresholdStates.waiting_for_child_selection,
+        ThresholdStates.waiting_for_child_selection.value,
         {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]}
     )
 
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines), keyboard=get_cancel_keyboard())
