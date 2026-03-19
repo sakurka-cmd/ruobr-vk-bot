@@ -738,7 +738,7 @@ def main() -> None:
     bot.loop_wrapper.add_task(periodic_cache_cleanup(interval=300))
     
     logger.info("Bot started. Press Ctrl+C to stop.")
-    bot.run_polling()
+    bot.run_forever()
 
 
 if __name__ == "__main__":
