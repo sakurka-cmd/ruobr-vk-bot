@@ -6,7 +6,6 @@ from typing import Optional
 
 from vkbottle import Keyboard, KeyboardButtonColor, Text, Callback, EMPTY_KEYBOARD
 from vkbottle.bot import Blueprint, Message
-from vkbottle_types.objects import MessagesKeyboardButtonAction
 
 from ..config import config
 from ..database import get_user, create_or_update_user, UserConfig
