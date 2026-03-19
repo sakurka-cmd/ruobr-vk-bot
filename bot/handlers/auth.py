@@ -4,7 +4,7 @@
 import logging
 from typing import Optional
 
-from vkbottle import Keyboard, KeyboardButtonColor, Text, Callback, EMPTY_KEYBOARD
+from vkbottle import Keyboard, KeyboardButtonColor, Text, Callback
 from vkbottle.bot import Blueprint, Message
 
 from ..config import config
@@ -74,7 +74,7 @@ def get_cancel_keyboard() -> str:
     ).get_json()
 
 
-def get_inline_child_select_keyboard(children, action: str, payload_prefix: str = "info") -> str:
+def get_inline_child_select_keyboard(children, action: str) -> str:
     """Инлайн клавиатура выбора ребенка."""
     kb = Keyboard(inline=True)
     for i, child in enumerate(children):
@@ -84,13 +84,39 @@ def get_inline_child_select_keyboard(children, action: str, payload_prefix: str 
     return kb.get_json()
 
 
+# ===== Утилиты для FSM =====
+
+async def get_user_state(peer_id: int) -> Optional[str]:
+    """Получить текущее состояние пользователя."""
+    state = await bp.state_dispenser.get(peer_id)
+    if state:
+        return state.state
+    return None
+
+
+async def set_user_state(peer_id: int, state_str: str, payload: dict = None):
+    """Установить состояние пользователя."""
+    await bp.state_dispenser.set(peer_id, state_str, payload or {})
+
+
+async def clear_user_state(peer_id: int):
+    """Очистить состояние пользователя."""
+    await bp.state_dispenser.delete(peer_id)
+
+
+async def get_state_payload(peer_id: int) -> Optional[dict]:
+    """Получить payload текущего состояния."""
+    state = await bp.state_dispenser.get(peer_id)
+    if state and state.payload:
+        return state.payload
+    return None
+
+
 # ===== Команды =====
 
 @bp.on.message(text="/start")
-async def cmd_start(message: Message, user_config: Optional[UserConfig] = None):
-    if user_config is None:
-        user_config = await create_or_update_user(message.peer_id)
-
+async def cmd_start(message: Message):
+    user_config = await create_or_update_user(message.peer_id)
     is_auth = user_config.login and user_config.password
 
     welcome_text = (
@@ -120,8 +146,7 @@ async def cmd_start(message: Message, user_config: Optional[UserConfig] = None):
 
 @bp.on.message(text="/set_login")
 async def cmd_set_login(message: Message):
-    # Устанавливаем состояние ожидания логина
-    await bp.state_dispenser.set(message.peer_id, LoginStates.waiting_for_login)
+    await set_user_state(message.peer_id, LoginStates.waiting_for_login)
     await message.answer(
         "🔐 Настройка учётных данных\n\n"
         "Введите логин от cabinet.ruobr.ru:\n\n"
@@ -130,105 +155,192 @@ async def cmd_set_login(message: Message):
     )
 
 
-@bp.on.message(state=LoginStates.waiting_for_login)
-async def process_login(message: Message):
+@bp.on.message()
+async def handle_state_messages(message: Message):
+    """Обработчик сообщений с проверкой состояния."""
+    current_state = await get_user_state(message.peer_id)
     text = message.text.strip() if message.text else ""
 
-    # Проверка отмены
-    if text == "❌ Отмена" or text == "/cancel":
-        await bp.state_dispenser.delete(message.peer_id)
+    # Проверка отмены для любого состояния
+    if text in ["❌ Отмена", "/cancel"]:
+        await clear_user_state(message.peer_id)
         await message.answer("❌ Отменено.", keyboard=get_main_keyboard())
         return
 
-    if not text:
-        await message.answer("❌ Логин не может быть пустым. Попробуйте ещё раз:")
+    # Обработка состояния ожидания логина
+    if current_state == LoginStates.waiting_for_login:
+        if not text:
+            await message.answer("❌ Логин не может быть пустым. Попробуйте ещё раз:")
+            return
+
+        if len(text) > 100:
+            await message.answer("❌ Логин слишком длинный. Попробуйте ещё раз:")
+            return
+
+        await set_user_state(message.peer_id, LoginStates.waiting_for_password, {"login": text})
+        await message.answer(
+            "✅ Логин сохранён.\n\n"
+            "Теперь введите пароль от cabinet.ruobr.ru:\n\n"
+            "❌ Отмена — для выхода",
+            keyboard=get_cancel_keyboard()
+        )
         return
 
-    if len(text) > 100:
-        await message.answer("❌ Логин слишком длинный. Попробуйте ещё раз:")
+    # Обработка состояния ожидания пароля
+    if current_state == LoginStates.waiting_for_password:
+        password = text
+
+        if not password:
+            await message.answer("❌ Пароль не может быть пустым. Попробуйте ещё раз:")
+            return
+
+        payload = await get_state_payload(message.peer_id)
+        login = payload.get("login", "") if payload else ""
+
+        # Удаляем сообщение с паролем
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        status_message = await message.answer("🔄 Проверка учётных данных...")
+
+        try:
+            children = await get_children_async(login, password)
+
+            if not children:
+                await status_message.edit(
+                    "⚠️ Учётные данные верны, но дети не найдены.\n"
+                    "Данные сохранены. Проверьте аккаунт на cabinet.ruobr.ru"
+                )
+            else:
+                children_list = "\n".join([f"  • {c.full_name} ({c.group})" for c in children])
+                await status_message.edit(
+                    f"✅ Успешная авторизация!\n\n"
+                    f"Найдены дети:\n{children_list}\n\n"
+                    f"Теперь доступны все функции бота."
+                )
+
+            await create_or_update_user(message.peer_id, login=login, password=password)
+            await message.answer("🏠 Главное меню", keyboard=get_main_keyboard())
+
+        except AuthenticationError:
+            await status_message.edit(
+                "❌ Ошибка авторизации!\n\n"
+                "Неверный логин или пароль. Попробуйте снова: /set_login"
+            )
+        except Exception as e:
+            logger.error(f"Error during login for user {message.peer_id}: {e}")
+            await status_message.edit(
+                "❌ Ошибка соединения!\n\n"
+                "Не удалось проверить учётные данные. Попробуйте позже."
+            )
+
+        await clear_user_state(message.peer_id)
         return
 
-    # Сохраняем логин в состоянии
-    await bp.state_dispenser.set(message.peer_id, LoginStates.waiting_for_password, {"login": text})
+    # Обработка состояний настройки порога
+    if current_state == LoginStates.waiting_for_child_selection:
+        from ..states import ThresholdStates
+        # Это перенаправляется в balance.py, но если попало сюда - обрабатываем
+        await handle_threshold_child_selection(message, text)
+        return
+
+    if current_state == ThresholdStates.waiting_for_threshold_value:
+        await handle_threshold_value_input(message, text)
+        return
+
+
+async def handle_threshold_child_selection(message: Message, text: str):
+    """Обработка выбора ребёнка для настройки порога."""
+    from ..states import ThresholdStates
+    from ..database import get_child_threshold, set_child_threshold
+    from ..services import get_children_async
+    from .balance import require_authentication
+
+    result = await require_authentication(message, None)
+    if result is None:
+        return
+
+    login, password, children = result
+
+    try:
+        idx = int(text)
+    except ValueError:
+        await message.answer("❌ Введите номер ребёнка (число).")
+        return
+
+    if idx < 1 or idx > len(children):
+        await message.answer(f"❌ Неверный номер. Введите число от 1 до {len(children)}.")
+        return
+
+    child = children[idx - 1]
+    current_threshold = await get_child_threshold(message.peer_id, child.id)
+
+    await set_user_state(
+        message.peer_id,
+        ThresholdStates.waiting_for_threshold_value,
+        {
+            "selected_child_id": child.id,
+            "selected_child_name": child.full_name,
+            "selected_child_group": child.group
+        }
+    )
+
     await message.answer(
-        "✅ Логин сохранён.\n\n"
-        "Теперь введите пароль от cabinet.ruobr.ru:\n\n"
-        "❌ Отмена — для выхода",
-        keyboard=get_cancel_keyboard()
+        f"👶 Выбран: {child.full_name} ({child.group})\n"
+        f"Текущий порог: {current_threshold:.0f} ₽\n\n"
+        f"Введите новый порог (число, например: 300):"
     )
 
 
-@bp.on.message(state=LoginStates.waiting_for_password)
-async def process_password(message: Message):
-    password = message.text.strip() if message.text else ""
+async def handle_threshold_value_input(message: Message, text: str):
+    """Обработка ввода значения порога."""
+    from ..states import ThresholdStates
+    from ..database import set_child_threshold
 
-    # Проверка отмены
-    if password == "❌ Отмена" or password == "/cancel":
-        await bp.state_dispenser.delete(message.peer_id)
-        await message.answer("❌ Отменено.", keyboard=get_main_keyboard())
+    payload = await get_state_payload(message.peer_id)
+    if not payload:
+        await clear_user_state(message.peer_id)
+        await message.answer("❌ Ошибка. Начните заново с /set_threshold", keyboard=get_main_keyboard())
         return
 
-    if not password:
-        await message.answer("❌ Пароль не может быть пустым. Попробуйте ещё раз:")
+    child_id = payload.get("selected_child_id")
+    child_name = payload.get("selected_child_name", "Ребёнок")
+
+    try:
+        value = float(text.replace(",", "."))
+    except ValueError:
+        await message.answer("❌ Введите число (например: 300).")
         return
 
-    state = await bp.state_dispenser.get(message.peer_id)
-    login = state.payload.get("login", "") if state and state.payload else ""
+    if value < 0:
+        await message.answer("❌ Порог не может быть отрицательным.")
+        return
+    if value > 10000:
+        await message.answer("❌ Порог слишком большой (максимум 10000 ₽).")
+        return
 
-    # Удаляем сообщение с паролем (если возможно)
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    await set_child_threshold(message.peer_id, child_id, value)
 
-    status_message = await message.answer("🔄 Проверка учётных данных...")
+    # Инвалидируем кэш порогов
+    from ..services.cache import threshold_cache
+    threshold_cache.delete(f"{message.peer_id}:thresholds")
 
-    try:
-        children = await get_children_async(login, password)
+    await clear_user_state(message.peer_id)
 
-        if not children:
-            await status_message.edit(
-                "⚠️ Учётные данные верны, но дети не найдены.\n"
-                "Данные сохранены. Проверьте аккаунт на cabinet.ruobr.ru"
-            )
-        else:
-            children_list = "\n".join([f"  • {c.full_name} ({c.group})" for c in children])
-            await status_message.edit(
-                f"✅ Успешная авторизация!\n\n"
-                f"Найдены дети:\n{children_list}\n\n"
-                f"Теперь доступны все функции бота."
-            )
-
-        # Сохраняем учётные данные
-        await create_or_update_user(message.peer_id, login=login, password=password)
-
-        # Отправляем клавиатуру отдельным сообщением
-        await message.answer("🏠 Главное меню", keyboard=get_main_keyboard())
-
-    except AuthenticationError:
-        await status_message.edit(
-            "❌ Ошибка авторизации!\n\n"
-            "Неверный логин или пароль. Попробуйте снова: /set_login"
-        )
-    except Exception as e:
-        logger.error(f"Error during login for user {message.peer_id}: {e}")
-        await status_message.edit(
-            "❌ Ошибка соединения!\n\n"
-            "Не удалось проверить учётные данные. Попробуйте позже."
-        )
-
-    await bp.state_dispenser.delete(message.peer_id)
+    await message.answer(
+        f"✅ Порог установлен!\n\n"
+        f"{child_name}: {value:.0f} ₽\n\n"
+        f"Вы будете получать уведомления, когда баланс упадёт ниже этого значения.",
+        keyboard=get_main_keyboard()
+    )
 
 
 @bp.on.message(text="/cancel")
 @bp.on.message(text="❌ Отмена")
 async def cmd_cancel(message: Message):
-    state = await bp.state_dispenser.get(message.peer_id)
-    if state is None:
-        await message.answer("Нет активной операции.", keyboard=get_main_keyboard())
-        return
-
-    await bp.state_dispenser.delete(message.peer_id)
+    await clear_user_state(message.peer_id)
     await message.answer("❌ Операция отменена.", keyboard=get_main_keyboard())
 
 
@@ -262,14 +374,13 @@ async def get_children_or_select(message: Message, user_config: UserConfig, acti
             return None
 
         if len(children) == 1:
-            return (children, 0)  # Один ребенок - возвращаем его индекс
+            return (children, 0)
 
-        # Несколько детей - показываем выбор
         await message.answer(
             f"👦👧 Выберите ребенка:",
             keyboard=get_inline_child_select_keyboard(children, action)
         )
-        return None  # Ждем callback
+        return None
 
     except Exception as e:
         logger.error(f"Error getting children: {e}")
@@ -288,11 +399,9 @@ async def show_classmates(message: Message, login: str, password: str, child_ind
             await status_msg.edit("ℹ️ Одноклассники не найдены.")
             return
 
-        # Получаем информацию о текущем ребенке для добавления в список
         children = await get_children_async(login, password)
         current_child = children[child_index] if children and child_index < len(children) else None
 
-        # Если ребёнка нет в списке одноклассников, добавляем его
         if current_child:
             child_as_classmate = type('Classmate', (), {
                 'last_name': current_child.last_name,
@@ -304,7 +413,6 @@ async def show_classmates(message: Message, login: str, password: str, child_ind
                 'gender_icon': current_child.gender_icon
             })()
 
-            # Проверяем, есть ли уже ребенок в списке
             child_in_list = any(c.last_name == child_as_classmate.last_name and
                                 c.first_name == child_as_classmate.first_name
                                 for c in classmates)
@@ -315,7 +423,6 @@ async def show_classmates(message: Message, login: str, password: str, child_ind
 
         from datetime import datetime
 
-        # Формируем таблицу с увеличенной шириной для ФИО
         lines = [f"👥 Классный список — {child_name} ({len(classmates_sorted)} чел.):\n"]
         lines.append("№   Фамилия Имя Отчество                    | Д.р.      | Возр")
         lines.append("─" * 62)
@@ -335,7 +442,6 @@ async def show_classmates(message: Message, login: str, password: str, child_ind
                 bd_str = "—"
                 age = "—"
 
-            # Форматируем имя (40 символов для полного ФИО)
             name_display = c.full_name[:40].ljust(40)
             icon = c.gender_icon
 
@@ -369,7 +475,6 @@ async def show_teachers(message: Message, login: str, password: str, child_index
             await status_msg.edit("ℹ️ Учителя не найдены.")
             return
 
-        # Фильтруем только учителей с предметами (предметники)
         subject_teachers = [t for t in guide.teachers if t.subject]
 
         lines = [f"👩‍🏫 Учителя — {child_name}\n"]
@@ -381,15 +486,12 @@ async def show_teachers(message: Message, login: str, password: str, child_index
         lines.append("")
 
         if subject_teachers:
-            # Разбиваем учителей с несколькими предметами на отдельные записи
             teacher_subject_pairs = []
             for t in subject_teachers:
-                # Разбиваем строку предметов по запятой
                 subjects = [s.strip() for s in t.subject.split(",") if s.strip()]
                 for subject in subjects:
                     teacher_subject_pairs.append((subject, t.name))
 
-            # Сортируем по предмету
             teacher_subject_pairs.sort(key=lambda x: x[0])
 
             lines.append("Предмет                         | Учитель")
@@ -443,7 +545,8 @@ async def show_achievements(message: Message, login: str, password: str, child_i
 
 # Обработчики кнопок информации
 @bp.on.message(text="👥 Одноклассники")
-async def btn_classmates(message: Message, user_config: Optional[UserConfig] = None):
+async def btn_classmates(message: Message):
+    user_config = await get_user(message.peer_id)
     if user_config is None or not user_config.login:
         await message.answer("❌ Сначала настройте логин/пароль через /set_login", keyboard=get_main_keyboard())
         return
@@ -455,7 +558,8 @@ async def btn_classmates(message: Message, user_config: Optional[UserConfig] = N
 
 
 @bp.on.message(text="👩‍🏫 Учителя")
-async def btn_teachers(message: Message, user_config: Optional[UserConfig] = None):
+async def btn_teachers(message: Message):
+    user_config = await get_user(message.peer_id)
     if user_config is None or not user_config.login:
         await message.answer("❌ Сначала настройте логин/пароль через /set_login", keyboard=get_main_keyboard())
         return
@@ -467,7 +571,8 @@ async def btn_teachers(message: Message, user_config: Optional[UserConfig] = Non
 
 
 @bp.on.message(text="🏆 Достижения")
-async def btn_achievements(message: Message, user_config: Optional[UserConfig] = None):
+async def btn_achievements(message: Message):
+    user_config = await get_user(message.peer_id)
     if user_config is None or not user_config.login:
         await message.answer("❌ Сначала настройте логин/пароль через /set_login", keyboard=get_main_keyboard())
         return
@@ -529,27 +634,23 @@ async def btn_help(message: Message):
     await message.answer(help_text)
 
 
-# Обработчик callback событий (инлайн кнопки) через message_event
+# Обработчик callback событий через message_event
 @bp.on.raw_event(
     event_group="message_event",
     event_type="message_event_new"
 )
 async def handle_callback_event(event):
     """Обработка событий с инлайн кнопок"""
-    from vkbottle_types.events import MessageEvent as MessageEventType
-    
-    # Получаем данные из события
     peer_id = event.object.peer_id
     event_id = event.object.event_id
     payload = event.object.payload or {}
-    
+
     action = payload.get("action", "")
     index = int(payload.get("index", 0))
 
     user_config = await get_user(peer_id)
 
     if user_config is None or not user_config.login:
-        # Отправляем callback ответ
         try:
             await bp.api.messages.send_message_event_answer(
                 event_id=event_id,
@@ -581,7 +682,6 @@ async def handle_callback_event(event):
         if action == "classmates":
             classmates = await get_classmates_for_child(user_config.login, user_config.password, index)
 
-            # Добавляем текущего ребенка
             child_as_classmate = type('Classmate', (), {
                 'last_name': child.last_name,
                 'first_name': child.first_name,
@@ -629,7 +729,6 @@ async def handle_callback_event(event):
             if len(text) > 4000:
                 text = text[:3997] + "..."
 
-            # Редактируем сообщение
             await bp.api.messages.edit(
                 peer_id=peer_id,
                 conversation_message_id=event.object.conversation_message_id,
@@ -701,6 +800,9 @@ async def handle_callback_event(event):
                 message="\n".join(lines)
             )
 
+        elif action in ["toggle_balance", "toggle_marks", "toggle_food"]:
+            await handle_notification_toggle_internal(event, action, peer_id, event_id)
+
     except Exception as e:
         logger.error(f"Error in callback handler: {e}")
         try:
@@ -708,10 +810,59 @@ async def handle_callback_event(event):
                 event_id=event_id,
                 user_id=event.object.user_id,
                 peer_id=peer_id,
-                event_data={"type": "snackbar", "text": f"❌ Ошибка: {e}"}
+                event_data={"type": "snackbar", "text": f"❌ Ошибка: {str(e)[:50]}"}
             )
         except:
             pass
+
+
+async def handle_notification_toggle_internal(event, action: str, peer_id: int, event_id: str):
+    """Обработка переключения уведомлений"""
+    user_config = await get_user(peer_id)
+    if user_config is None:
+        try:
+            await bp.api.messages.send_message_event_answer(
+                event_id=event_id,
+                user_id=event.object.user_id,
+                peer_id=peer_id,
+                event_data={"type": "snackbar", "text": "Ошибка!"}
+            )
+        except:
+            pass
+        return
+
+    if action == "toggle_balance":
+        new_status = not user_config.enabled
+        await create_or_update_user(peer_id, enabled=new_status)
+        msg = f"{'Включено' if new_status else 'Выключено'}!"
+    elif action == "toggle_marks":
+        new_status = not user_config.marks_enabled
+        await create_or_update_user(peer_id, marks_enabled=new_status)
+        msg = f"{'Включено' if new_status else 'Выключено'}!"
+    elif action == "toggle_food":
+        new_status = not getattr(user_config, 'food_enabled', True)
+        await create_or_update_user(peer_id, food_enabled=new_status)
+        msg = f"{'Включено' if new_status else 'Выключено'}!"
+    else:
+        return
+
+    try:
+        await bp.api.messages.send_message_event_answer(
+            event_id=event_id,
+            user_id=event.object.user_id,
+            peer_id=peer_id,
+            event_data={"type": "snackbar", "text": msg}
+        )
+    except:
+        pass
+
+    updated = await get_user(peer_id)
+    await bp.api.messages.edit(
+        peer_id=peer_id,
+        conversation_message_id=event.object.conversation_message_id,
+        message="🔔 Настройки уведомлений\n\nНажмите для включения/выключения:",
+        keyboard=get_notification_keyboard(updated)
+    )
 
 
 @bp.on.message(text="◀️ Назад")
@@ -720,9 +871,8 @@ async def btn_back(message: Message):
 
 
 @bp.on.message(text="👤 Мой профиль")
-async def btn_profile(message: Message, user_config: Optional[UserConfig] = None):
-    if user_config is None:
-        user_config = await get_user(message.peer_id)
+async def btn_profile(message: Message):
+    user_config = await get_user(message.peer_id)
 
     if user_config is None:
         await message.answer("Профиль не найден. Используйте /start", keyboard=get_main_keyboard())
@@ -773,9 +923,8 @@ def get_notification_keyboard(user_config: UserConfig) -> str:
 
 
 @bp.on.message(text="🔔 Уведомления")
-async def btn_notifications(message: Message, user_config: Optional[UserConfig] = None):
-    if user_config is None:
-        user_config = await get_user(message.peer_id)
+async def btn_notifications(message: Message):
+    user_config = await get_user(message.peer_id)
     if user_config is None:
         user_config = await create_or_update_user(message.peer_id)
 
@@ -783,69 +932,4 @@ async def btn_notifications(message: Message, user_config: Optional[UserConfig] 
         "🔔 Настройки уведомлений\n\n"
         "Нажмите для включения/выключения:",
         keyboard=get_notification_keyboard(user_config)
-    )
-
-
-# Обработчик для toggle уведомлений через callback
-@bp.on.raw_event(
-    event_group="message_event",
-    event_type="message_event_new"
-)
-async def handle_notification_toggle(event):
-    """Обработка переключения уведомлений"""
-    payload = event.object.payload or {}
-    action = payload.get("action", "")
-
-    if action not in ["toggle_balance", "toggle_marks", "toggle_food"]:
-        return  # Не наше событие
-
-    peer_id = event.object.peer_id
-    event_id = event.object.event_id
-    
-    user_config = await get_user(peer_id)
-    if user_config is None:
-        try:
-            await bp.api.messages.send_message_event_answer(
-                event_id=event_id,
-                user_id=event.object.user_id,
-                peer_id=peer_id,
-                event_data={"type": "snackbar", "text": "Ошибка!"}
-            )
-        except:
-            pass
-        return
-
-    if action == "toggle_balance":
-        new_status = not user_config.enabled
-        await create_or_update_user(peer_id, enabled=new_status)
-        msg = f"{'Включено' if new_status else 'Выключено'}!"
-    elif action == "toggle_marks":
-        new_status = not user_config.marks_enabled
-        await create_or_update_user(peer_id, marks_enabled=new_status)
-        msg = f"{'Включено' if new_status else 'Выключено'}!"
-    elif action == "toggle_food":
-        new_status = not getattr(user_config, 'food_enabled', True)
-        await create_or_update_user(peer_id, food_enabled=new_status)
-        msg = f"{'Включено' if new_status else 'Выключено'}!"
-    else:
-        return
-
-    # Отправляем snackbar
-    try:
-        await bp.api.messages.send_message_event_answer(
-            event_id=event_id,
-            user_id=event.object.user_id,
-            peer_id=peer_id,
-            event_data={"type": "snackbar", "text": msg}
-        )
-    except:
-        pass
-
-    # Обновляем клавиатуру
-    updated = await get_user(peer_id)
-    await bp.api.messages.edit(
-        peer_id=peer_id,
-        conversation_message_id=event.object.conversation_message_id,
-        message="🔔 Настройки уведомлений\n\nНажмите для включения/выключения:",
-        keyboard=get_notification_keyboard(updated)
     )

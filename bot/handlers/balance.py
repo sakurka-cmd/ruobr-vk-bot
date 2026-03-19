@@ -3,7 +3,7 @@
 """
 import logging
 from datetime import date
-from typing import Dict, List, Optional
+from typing import Optional
 
 from vkbottle import Keyboard, KeyboardButtonColor, Text
 from vkbottle.bot import Blueprint, Message
@@ -21,7 +21,7 @@ from ..services import (
 from ..utils.formatters import (
     format_balance, format_food_visit, format_date, truncate_text
 )
-from .auth import get_main_keyboard, get_settings_keyboard, bp
+from .auth import get_main_keyboard, get_settings_keyboard, bp, set_user_state
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +64,9 @@ async def require_authentication(
 
 @bp.on.message(text="/balance")
 @bp.on.message(text="💰 Баланс питания")
-async def cmd_balance(message: Message, user_config: Optional[UserConfig] = None):
+async def cmd_balance(message: Message):
     """Показать баланс питания всех детей."""
-    result = await require_authentication(message, user_config)
+    result = await require_authentication(message, None)
     if result is None:
         return
 
@@ -75,7 +75,6 @@ async def cmd_balance(message: Message, user_config: Optional[UserConfig] = None
     status_msg = await message.answer("🔄 Загрузка информации о балансе...")
 
     try:
-        # Получаем информацию о питании
         food_info = await get_food_for_children(login, password, children)
         thresholds = await get_all_thresholds_for_peer(message.peer_id)
 
@@ -111,9 +110,9 @@ async def cmd_balance(message: Message, user_config: Optional[UserConfig] = None
 
 @bp.on.message(text="/foodtoday")
 @bp.on.message(text="🍽 Питание сегодня")
-async def cmd_foodtoday(message: Message, user_config: Optional[UserConfig] = None):
+async def cmd_foodtoday(message: Message):
     """Показать информацию о питании за сегодня."""
-    result = await require_authentication(message, user_config)
+    result = await require_authentication(message, None)
     if result is None:
         return
 
@@ -139,7 +138,6 @@ async def cmd_foodtoday(message: Message, user_config: Optional[UserConfig] = No
                 if visit.get("date") != today_str:
                     continue
 
-                # Проверяем, было ли подтверждённое питание
                 if not visit.get("ordered") and visit.get("state") != 30:
                     continue
 
@@ -167,9 +165,9 @@ async def cmd_foodtoday(message: Message, user_config: Optional[UserConfig] = No
 
 @bp.on.message(text="/set_threshold")
 @bp.on.message(text="💰 Порог баланса")
-async def cmd_set_threshold(message: Message, user_config: Optional[UserConfig] = None):
+async def cmd_set_threshold(message: Message):
     """Начало настройки порога баланса."""
-    result = await require_authentication(message, user_config)
+    result = await require_authentication(message, None)
     if result is None:
         return
 
@@ -189,115 +187,10 @@ async def cmd_set_threshold(message: Message, user_config: Optional[UserConfig] 
     lines.append("\n📝 Ответьте номером ребёнка.")
 
     # Сохраняем данные детей в состоянии
-    await bp.state_dispenser.set(
+    await set_user_state(
         message.peer_id,
         ThresholdStates.waiting_for_child_selection,
         {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]}
     )
 
     await message.answer("\n".join(lines))
-
-
-@bp.on.message(state=ThresholdStates.waiting_for_child_selection)
-async def process_threshold_child(message: Message):
-    """Обработка выбора ребёнка для настройки порога."""
-    text = message.text.strip() if message.text else ""
-
-    # Отмена
-    if text in ["❌ Отмена", "/cancel", "◀️ Назад"]:
-        await bp.state_dispenser.delete(message.peer_id)
-        await message.answer("❌ Настройка отменена.", keyboard=get_main_keyboard())
-        return
-
-    state = await bp.state_dispenser.get(message.peer_id)
-    if not state or not state.payload:
-        await message.answer("❌ Ошибка. Начните заново с /set_threshold", keyboard=get_main_keyboard())
-        return
-
-    children = state.payload.get("children", [])
-
-    try:
-        idx = int(text)
-    except ValueError:
-        await message.answer("❌ Введите номер ребёнка (число).")
-        return
-
-    if idx < 1 or idx > len(children):
-        await message.answer(f"❌ Неверный номер. Введите число от 1 до {len(children)}.")
-        return
-
-    child = children[idx - 1]
-    current_threshold = await get_child_threshold(message.peer_id, child["id"])
-
-    # Обновляем состояние
-    await bp.state_dispenser.set(
-        message.peer_id,
-        ThresholdStates.waiting_for_threshold_value,
-        {
-            **state.payload,
-            "selected_child_id": child["id"],
-            "selected_child_name": child["name"]
-        }
-    )
-
-    await message.answer(
-        f"👶 Выбран: {child['name']} ({child['group']})\n"
-        f"Текущий порог: {current_threshold:.0f} ₽\n\n"
-        f"Введите новый порог (число, например: 300):"
-    )
-
-
-@bp.on.message(state=ThresholdStates.waiting_for_threshold_value)
-async def process_threshold_value(message: Message):
-    """Обработка ввода значения порога."""
-    text = message.text.strip() if message.text else ""
-
-    # Отмена
-    if text in ["❌ Отмена", "/cancel", "◀️ Назад"]:
-        await bp.state_dispenser.delete(message.peer_id)
-        await message.answer("❌ Настройка отменена.", keyboard=get_main_keyboard())
-        return
-
-    state = await bp.state_dispenser.get(message.peer_id)
-    if not state or not state.payload:
-        await bp.state_dispenser.delete(message.peer_id)
-        await message.answer("❌ Ошибка. Начните заново с /set_threshold", keyboard=get_main_keyboard())
-        return
-
-    child_id = state.payload.get("selected_child_id")
-    child_name = state.payload.get("selected_child_name", "Ребёнок")
-
-    if child_id is None:
-        await bp.state_dispenser.delete(message.peer_id)
-        await message.answer("❌ Ошибка. Начните заново с /set_threshold", keyboard=get_main_keyboard())
-        return
-
-    try:
-        value = float(text.replace(",", "."))
-    except ValueError:
-        await message.answer("❌ Введите число (например: 300).")
-        return
-
-    # Валидация диапазона
-    if value < 0:
-        await message.answer("❌ Порог не может быть отрицательным.")
-        return
-    if value > 10000:
-        await message.answer("❌ Порог слишком большой (максимум 10000 ₽).")
-        return
-
-    # Сохраняем
-    await set_child_threshold(message.peer_id, child_id, value)
-
-    # Инвалидируем кэш порогов
-    from ..services.cache import threshold_cache
-    threshold_cache.delete(f"{message.peer_id}:thresholds")
-
-    await bp.state_dispenser.delete(message.peer_id)
-
-    await message.answer(
-        f"✅ Порог установлен!\n\n"
-        f"{child_name}: {value:.0f} ₽\n\n"
-        f"Вы будете получать уведомления, когда баланс упадёт ниже этого значения.",
-        keyboard=get_main_keyboard()
-    )
