@@ -1,6 +1,3 @@
 """
-Обработчики бота.
+Обработчики бота (теперь все в main.py).
 """
-from . import auth, balance, schedule
-
-__all__ = ["auth", "balance", "schedule"]
