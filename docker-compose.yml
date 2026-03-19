@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: ruobr-vk-bot
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      - VK_TOKEN=${VK_TOKEN}
+      - VK_GROUP_ID=${VK_GROUP_ID}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - ADMIN_IDS=${ADMIN_IDS:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CHECK_INTERVAL_SECONDS=${CHECK_INTERVAL_SECONDS:-300}
+      - DEFAULT_BALANCE_THRESHOLD=${DEFAULT_BALANCE_THRESHOLD:-300}

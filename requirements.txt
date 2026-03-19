@@ -1,0 +1,23 @@
+# Ruobr VK Bot Dependencies
+
+# VK Bot Framework
+vkbottle>=4.3.0
+
+# Database
+aiosqlite>=0.19.0
+
+# Encryption
+cryptography>=41.0.0
+
+# Ruobr API
+ruobr-api>=1.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# HTTP Client (for async requests)
+aiohttp>=3.9.0
+
+# Development
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
