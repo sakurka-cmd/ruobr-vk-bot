@@ -731,12 +731,14 @@ def main() -> None:
         await db_pool.close()
         logger.info("Bot stopped")
 
-    bot.loop_wrapper.add_task(on_startup())
+    # Добавляем задачи в loop_wrapper
+    bot.loop_wrapper.on_startup.append(on_startup())
+    bot.loop_wrapper.on_shutdown.append(on_shutdown())
     bot.loop_wrapper.add_task(NotificationService(bot.api).start())
     bot.loop_wrapper.add_task(periodic_cache_cleanup(interval=300))
     
     logger.info("Bot started. Press Ctrl+C to stop.")
-    bot.run_polling(on_shutdown=on_shutdown)
+    bot.run_polling()
 
 
 if __name__ == "__main__":
