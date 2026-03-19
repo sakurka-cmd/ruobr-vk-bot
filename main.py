@@ -111,22 +111,31 @@ def get_notification_keyboard(user_config) -> str:
 
 # ===== Утилиты для FSM =====
 
+# Хранилище payload для состояний (в vkbottle 4.x BuiltinStateDispenser не поддерживает payload)
+_state_payloads: dict[int, dict] = {}
+
+
 async def get_user_state(dispenser, peer_id: int) -> str:
     state = await dispenser.get(peer_id)
     return state.state if state else None
 
 
 async def set_user_state(dispenser, peer_id: int, state_str: str, payload: dict = None):
-    await dispenser.set(peer_id, state_str, payload or {})
+    await dispenser.set(peer_id, state_str)
+    if payload:
+        _state_payloads[peer_id] = payload
+    elif peer_id in _state_payloads:
+        del _state_payloads[peer_id]
 
 
 async def clear_user_state(dispenser, peer_id: int):
     await dispenser.delete(peer_id)
+    if peer_id in _state_payloads:
+        del _state_payloads[peer_id]
 
 
 async def get_state_payload(dispenser, peer_id: int):
-    state = await dispenser.get(peer_id)
-    return state.payload if state and state.payload else None
+    return _state_payloads.get(peer_id)
 
 
 # ===== Вспомогательные функции =====
