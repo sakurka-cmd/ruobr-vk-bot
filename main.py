@@ -272,11 +272,9 @@ async def handle_child_selection(message: Message, text: str, action: str, bot):
         await show_achievements(message, user_config.login, user_config.password, idx - 1, child["name"])
 
 
-async def main() -> None:
+def main() -> None:
     setup_logging()
     logger.info("Starting Ruobr VK Bot v2.0")
-    await db_pool.initialize()
-    logger.info("Database initialized")
 
     bot = Bot(token=config.vk_token)
     labeler = bot.labeler
@@ -725,46 +723,25 @@ async def main() -> None:
             await status_msg.edit(f"❌ Ошибка: {e}")
 
     # ===== Запуск =====
-    notification_service = NotificationService(bot.api)
-    notification_task = asyncio.create_task(notification_service.start())
-    cache_task = asyncio.create_task(periodic_cache_cleanup(interval=300))
-    logger.info("Bot started. Press Ctrl+C to stop.")
+    async def on_startup():
+        await db_pool.initialize()
+        logger.info("Database initialized")
 
-    loop = asyncio.get_event_loop()
-    def stop():
-        logger.info("Stopping...")
-        notification_service.stop()
-        notification_task.cancel()
-        cache_task.cancel()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop)
-        except NotImplementedError:
-            pass
-
-    try:
-        await bot.run_polling()
-    except asyncio.CancelledError:
-        pass
-    finally:
-        notification_task.cancel()
-        cache_task.cancel()
-        try:
-            await notification_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await cache_task
-        except asyncio.CancelledError:
-            pass
+    async def on_shutdown():
         await db_pool.close()
         logger.info("Bot stopped")
+
+    bot.loop_wrapper.add_task(on_startup())
+    bot.loop_wrapper.add_task(NotificationService(bot.api).start())
+    bot.loop_wrapper.add_task(periodic_cache_cleanup(interval=300))
+    
+    logger.info("Bot started. Press Ctrl+C to stop.")
+    bot.run_polling(on_shutdown=on_shutdown)
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         pass
     except Exception as e:
