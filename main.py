@@ -341,12 +341,14 @@ def main() -> None:
         await message.answer("🔐 Настройка учётных данных\n\nВведите логин от cabinet.ruobr.ru:\n\n❌ Отмена — для выхода", keyboard=get_cancel_keyboard())
 
     # ===== Обработчик всех сообщений (для FSM) =====
-    @labeler.message()
+    @labeler.message(blocking=False)
     async def handle_all_messages(message: Message):
-        logger.info(f"Received message: '{message.text}' from peer_id={message.peer_id}")
         current_state = await get_user_state(bot.state_dispenser, message.peer_id)
         text = message.text.strip() if message.text else ""
-        logger.info(f"Current state: {current_state}, text: '{text}'")
+        
+        # Если нет состояния - пропускаем, чтобы сработали специфичные обработчики
+        if not current_state:
+            return
 
         # Проверка отмены
         if text in ["❌ Отмена", "/cancel", "◀️ Назад"]:
