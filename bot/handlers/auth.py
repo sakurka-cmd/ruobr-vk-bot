@@ -5,7 +5,8 @@ import logging
 from typing import Optional
 
 from vkbottle import Keyboard, KeyboardButtonColor, Text, Callback, EMPTY_KEYBOARD
-from vkbottle.bot import Blueprint, Message, MessageEvent
+from vkbottle.bot import Blueprint, Message
+from vkbottle_types.objects import MessagesKeyboardButtonAction
 
 from ..config import config
 from ..database import get_user, create_or_update_user, UserConfig
@@ -80,7 +81,7 @@ def get_inline_child_select_keyboard(children, action: str, payload_prefix: str 
     for i, child in enumerate(children):
         if i > 0:
             kb.row()
-        kb.add(Callback(f"👤 {child.full_name} ({child.group})", payload={"action": action, "index": i}))
+        kb.add(Callback(f"👤 {child.full_name} ({child.group})", payload={"action": action, "index": str(i)}))
     return kb.get_json()
 
 
@@ -121,7 +122,7 @@ async def cmd_start(message: Message, user_config: Optional[UserConfig] = None):
 @bp.on.message(text="/set_login")
 async def cmd_set_login(message: Message):
     # Устанавливаем состояние ожидания логина
-    bp.state_dispenser.set(message.peer_id, LoginStates.waiting_for_login)
+    await bp.state_dispenser.set(message.peer_id, LoginStates.waiting_for_login)
     await message.answer(
         "🔐 Настройка учётных данных\n\n"
         "Введите логин от cabinet.ruobr.ru:\n\n"
@@ -136,7 +137,7 @@ async def process_login(message: Message):
 
     # Проверка отмены
     if text == "❌ Отмена" or text == "/cancel":
-        bp.state_dispenser.delete(message.peer_id)
+        await bp.state_dispenser.delete(message.peer_id)
         await message.answer("❌ Отменено.", keyboard=get_main_keyboard())
         return
 
@@ -149,7 +150,7 @@ async def process_login(message: Message):
         return
 
     # Сохраняем логин в состоянии
-    bp.state_dispenser.set(message.peer_id, LoginStates.waiting_for_password, {"login": text})
+    await bp.state_dispenser.set(message.peer_id, LoginStates.waiting_for_password, {"login": text})
     await message.answer(
         "✅ Логин сохранён.\n\n"
         "Теперь введите пароль от cabinet.ruobr.ru:\n\n"
@@ -164,7 +165,7 @@ async def process_password(message: Message):
 
     # Проверка отмены
     if password == "❌ Отмена" or password == "/cancel":
-        bp.state_dispenser.delete(message.peer_id)
+        await bp.state_dispenser.delete(message.peer_id)
         await message.answer("❌ Отменено.", keyboard=get_main_keyboard())
         return
 
@@ -172,7 +173,7 @@ async def process_password(message: Message):
         await message.answer("❌ Пароль не может быть пустым. Попробуйте ещё раз:")
         return
 
-    state = bp.state_dispenser.get(message.peer_id)
+    state = await bp.state_dispenser.get(message.peer_id)
     login = state.payload.get("login", "") if state and state.payload else ""
 
     # Удаляем сообщение с паролем (если возможно)
@@ -217,18 +218,18 @@ async def process_password(message: Message):
             "Не удалось проверить учётные данные. Попробуйте позже."
         )
 
-    bp.state_dispenser.delete(message.peer_id)
+    await bp.state_dispenser.delete(message.peer_id)
 
 
 @bp.on.message(text="/cancel")
 @bp.on.message(text="❌ Отмена")
 async def cmd_cancel(message: Message):
-    state = bp.state_dispenser.get(message.peer_id)
+    state = await bp.state_dispenser.get(message.peer_id)
     if state is None:
         await message.answer("Нет активной операции.", keyboard=get_main_keyboard())
         return
 
-    bp.state_dispenser.delete(message.peer_id)
+    await bp.state_dispenser.delete(message.peer_id)
     await message.answer("❌ Операция отменена.", keyboard=get_main_keyboard())
 
 
@@ -529,31 +530,56 @@ async def btn_help(message: Message):
     await message.answer(help_text)
 
 
-# Обработчики callback событий (инлайн кнопки)
-@bp.on.event_message_event()
-async def handle_callback_event(event: MessageEvent):
+# Обработчик callback событий (инлайн кнопки) через message_event
+@bp.on.raw_event(
+    event_group="message_event",
+    event_type="message_event_new"
+)
+async def handle_callback_event(event):
     """Обработка событий с инлайн кнопок"""
-    payload = event.payload
+    from vkbottle_types.events import MessageEvent as MessageEventType
+    
+    # Получаем данные из события
+    peer_id = event.object.peer_id
+    event_id = event.object.event_id
+    payload = event.object.payload or {}
+    
     action = payload.get("action", "")
-    index = payload.get("index", 0)
+    index = int(payload.get("index", 0))
 
-    user_config = await get_user(event.peer_id)
+    user_config = await get_user(peer_id)
 
     if user_config is None or not user_config.login:
-        await event.show_snackbar("❌ Ошибка авторизации")
+        # Отправляем callback ответ
+        try:
+            await bp.api.messages.send_message_event_answer(
+                event_id=event_id,
+                user_id=event.object.user_id,
+                peer_id=peer_id,
+                event_data={"type": "snackbar", "text": "❌ Ошибка авторизации"}
+            )
+        except:
+            pass
         return
 
     try:
         children = await get_children_async(user_config.login, user_config.password)
 
         if not children or index >= len(children):
-            await event.show_snackbar("❌ Ошибка: ребёнок не найден")
+            try:
+                await bp.api.messages.send_message_event_answer(
+                    event_id=event_id,
+                    user_id=event.object.user_id,
+                    peer_id=peer_id,
+                    event_data={"type": "snackbar", "text": "❌ Ошибка: ребёнок не найден"}
+                )
+            except:
+                pass
             return
 
         child = children[index]
 
         if action == "classmates":
-            await event.edit_message("🔄 Загрузка одноклассников...")
             classmates = await get_classmates_for_child(user_config.login, user_config.password, index)
 
             # Добавляем текущего ребенка
@@ -604,10 +630,14 @@ async def handle_callback_event(event: MessageEvent):
             if len(text) > 4000:
                 text = text[:3997] + "..."
 
-            await event.edit_message(text)
+            # Редактируем сообщение
+            await bp.api.messages.edit(
+                peer_id=peer_id,
+                conversation_message_id=event.object.conversation_message_id,
+                message=text
+            )
 
         elif action == "teachers":
-            await event.edit_message("🔄 Загрузка учителей...")
             guide = await get_guide_for_child(user_config.login, user_config.password, index)
 
             subject_teachers = [t for t in guide.teachers if t.subject]
@@ -638,10 +668,13 @@ async def handle_callback_event(event: MessageEvent):
             else:
                 lines.append("Предметники не найдены.")
 
-            await event.edit_message("\n".join(lines))
+            await bp.api.messages.edit(
+                peer_id=peer_id,
+                conversation_message_id=event.object.conversation_message_id,
+                message="\n".join(lines)
+            )
 
         elif action == "achievements":
-            await event.edit_message("🔄 Загрузка достижений...")
             achievements = await get_achievements_for_child(user_config.login, user_config.password, index)
 
             lines = [f"🏆 Достижения — {child.full_name}\n"]
@@ -663,12 +696,21 @@ async def handle_callback_event(event: MessageEvent):
             if achievements.gto_id:
                 lines.append(f"\n🏃 ГТО ID: {achievements.gto_id}")
 
-            await event.edit_message("\n".join(lines))
+            await bp.api.messages.edit(
+                peer_id=peer_id,
+                conversation_message_id=event.object.conversation_message_id,
+                message="\n".join(lines)
+            )
 
     except Exception as e:
         logger.error(f"Error in callback handler: {e}")
         try:
-            await event.show_snackbar(f"❌ Ошибка: {e}")
+            await bp.api.messages.send_message_event_answer(
+                event_id=event_id,
+                user_id=event.object.user_id,
+                peer_id=peer_id,
+                event_data={"type": "snackbar", "text": f"❌ Ошибка: {e}"}
+            )
         except:
             pass
 
@@ -745,37 +787,66 @@ async def btn_notifications(message: Message, user_config: Optional[UserConfig] 
     )
 
 
-# Обработчики для toggle уведомлений через callback
-@bp.on.event_message_event()
-async def handle_notification_toggle(event: MessageEvent):
+# Обработчик для toggle уведомлений через callback
+@bp.on.raw_event(
+    event_group="message_event",
+    event_type="message_event_new"
+)
+async def handle_notification_toggle(event):
     """Обработка переключения уведомлений"""
-    payload = event.payload
+    payload = event.object.payload or {}
     action = payload.get("action", "")
 
     if action not in ["toggle_balance", "toggle_marks", "toggle_food"]:
         return  # Не наше событие
 
-    user_config = await get_user(event.peer_id)
+    peer_id = event.object.peer_id
+    event_id = event.object.event_id
+    
+    user_config = await get_user(peer_id)
     if user_config is None:
-        await event.show_snackbar("Ошибка!")
+        try:
+            await bp.api.messages.send_message_event_answer(
+                event_id=event_id,
+                user_id=event.object.user_id,
+                peer_id=peer_id,
+                event_data={"type": "snackbar", "text": "Ошибка!"}
+            )
+        except:
+            pass
         return
 
     if action == "toggle_balance":
         new_status = not user_config.enabled
-        await create_or_update_user(event.peer_id, enabled=new_status)
-        await event.show_snackbar(f"{'Включено' if new_status else 'Выключено'}!")
+        await create_or_update_user(peer_id, enabled=new_status)
+        msg = f"{'Включено' if new_status else 'Выключено'}!"
     elif action == "toggle_marks":
         new_status = not user_config.marks_enabled
-        await create_or_update_user(event.peer_id, marks_enabled=new_status)
-        await event.show_snackbar(f"{'Включено' if new_status else 'Выключено'}!")
+        await create_or_update_user(peer_id, marks_enabled=new_status)
+        msg = f"{'Включено' if new_status else 'Выключено'}!"
     elif action == "toggle_food":
         new_status = not getattr(user_config, 'food_enabled', True)
-        await create_or_update_user(event.peer_id, food_enabled=new_status)
-        await event.show_snackbar(f"{'Включено' if new_status else 'Выключено'}!")
+        await create_or_update_user(peer_id, food_enabled=new_status)
+        msg = f"{'Включено' if new_status else 'Выключено'}!"
+    else:
+        return
 
-    updated = await get_user(event.peer_id)
-    await event.edit_message(
-        "🔔 Настройки уведомлений\n\n"
-        "Нажмите для включения/выключения:",
+    # Отправляем snackbar
+    try:
+        await bp.api.messages.send_message_event_answer(
+            event_id=event_id,
+            user_id=event.object.user_id,
+            peer_id=peer_id,
+            event_data={"type": "snackbar", "text": msg}
+        )
+    except:
+        pass
+
+    # Обновляем клавиатуру
+    updated = await get_user(peer_id)
+    await bp.api.messages.edit(
+        peer_id=peer_id,
+        conversation_message_id=event.object.conversation_message_id,
+        message="🔔 Настройки уведомлений\n\nНажмите для включения/выключения:",
         keyboard=get_notification_keyboard(updated)
     )

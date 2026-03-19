@@ -189,7 +189,7 @@ async def cmd_set_threshold(message: Message, user_config: Optional[UserConfig] 
     lines.append("\n📝 Ответьте номером ребёнка.")
 
     # Сохраняем данные детей в состоянии
-    bp.state_dispenser.set(
+    await bp.state_dispenser.set(
         message.peer_id,
         ThresholdStates.waiting_for_child_selection,
         {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]}
@@ -205,11 +205,11 @@ async def process_threshold_child(message: Message):
 
     # Отмена
     if text in ["❌ Отмена", "/cancel", "◀️ Назад"]:
-        bp.state_dispenser.delete(message.peer_id)
+        await bp.state_dispenser.delete(message.peer_id)
         await message.answer("❌ Настройка отменена.", keyboard=get_main_keyboard())
         return
 
-    state = bp.state_dispenser.get(message.peer_id)
+    state = await bp.state_dispenser.get(message.peer_id)
     if not state or not state.payload:
         await message.answer("❌ Ошибка. Начните заново с /set_threshold", keyboard=get_main_keyboard())
         return
@@ -230,7 +230,7 @@ async def process_threshold_child(message: Message):
     current_threshold = await get_child_threshold(message.peer_id, child["id"])
 
     # Обновляем состояние
-    bp.state_dispenser.set(
+    await bp.state_dispenser.set(
         message.peer_id,
         ThresholdStates.waiting_for_threshold_value,
         {
@@ -254,13 +254,13 @@ async def process_threshold_value(message: Message):
 
     # Отмена
     if text in ["❌ Отмена", "/cancel", "◀️ Назад"]:
-        bp.state_dispenser.delete(message.peer_id)
+        await bp.state_dispenser.delete(message.peer_id)
         await message.answer("❌ Настройка отменена.", keyboard=get_main_keyboard())
         return
 
-    state = bp.state_dispenser.get(message.peer_id)
+    state = await bp.state_dispenser.get(message.peer_id)
     if not state or not state.payload:
-        bp.state_dispenser.delete(message.peer_id)
+        await bp.state_dispenser.delete(message.peer_id)
         await message.answer("❌ Ошибка. Начните заново с /set_threshold", keyboard=get_main_keyboard())
         return
 
@@ -268,7 +268,7 @@ async def process_threshold_value(message: Message):
     child_name = state.payload.get("selected_child_name", "Ребёнок")
 
     if child_id is None:
-        bp.state_dispenser.delete(message.peer_id)
+        await bp.state_dispenser.delete(message.peer_id)
         await message.answer("❌ Ошибка. Начните заново с /set_threshold", keyboard=get_main_keyboard())
         return
 
@@ -293,7 +293,7 @@ async def process_threshold_value(message: Message):
     from ..services.cache import threshold_cache
     threshold_cache.delete(f"{message.peer_id}:thresholds")
 
-    bp.state_dispenser.delete(message.peer_id)
+    await bp.state_dispenser.delete(message.peer_id)
 
     await message.answer(
         f"✅ Порог установлен!\n\n"

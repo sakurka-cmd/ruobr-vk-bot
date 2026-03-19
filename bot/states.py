@@ -1,22 +1,22 @@
 """
 Определение состояний FSM для многошаговых операций.
 """
-from vkbottle import StatePeer
+from vkbottle.bot import StateGroup, State
 
 
-class LoginStates:
+class LoginStates(StateGroup):
     """Состояния процесса входа."""
-    waiting_for_login = "login:waiting_for_login"
-    waiting_for_password = "login:waiting_for_password"
+    waiting_for_login = State()
+    waiting_for_password = State()
 
 
-class ThresholdStates:
+class ThresholdStates(StateGroup):
     """Состояния настройки порога баланса."""
-    waiting_for_child_selection = "threshold:waiting_for_child_selection"
-    waiting_for_threshold_value = "threshold:waiting_for_threshold_value"
+    waiting_for_child_selection = State()
+    waiting_for_threshold_value = State()
 
 
-class NotificationStates:
+class NotificationStates(StateGroup):
     """Состояния настройки уведомлений."""
-    choosing_notification_type = "notification:choosing_notification_type"
-    setting_parameters = "notification:setting_parameters"
+    choosing_notification_type = State()
+    setting_parameters = State()
