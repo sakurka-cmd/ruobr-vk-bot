@@ -129,7 +129,10 @@ async def set_user_state(dispenser, peer_id: int, state_str: str, payload: dict 
 
 
 async def clear_user_state(dispenser, peer_id: int):
-    await dispenser.delete(peer_id)
+    # Проверяем наличие состояния перед удалением
+    state = await dispenser.get(peer_id)
+    if state:
+        await dispenser.delete(peer_id)
     if peer_id in _state_payloads:
         del _state_payloads[peer_id]
 
@@ -818,6 +821,23 @@ def main() -> None:
         await clear_user_state(bot.state_dispenser, message.peer_id)
         await message.answer("❌ Операция отменена.", keyboard=get_main_keyboard())
 
+    # ===== Кнопки уведомлений (динамический текст) =====
+    @labeler.message(text_startswith="💰 Баланс:")
+    async def btn_toggle_balance(message: Message):
+        user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
+        new_status = not user_config.enabled
+        await create_or_update_user(message.peer_id, enabled=new_status)
+        await message.answer(f"🔔 Уведомления о балансе: {'✅ включены' if new_status else '❌ выключены'}", 
+                           keyboard=get_notification_keyboard(await get_user(message.peer_id)))
+
+    @labeler.message(text_startswith="⭐ Оценки:")
+    async def btn_toggle_marks(message: Message):
+        user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
+        new_status = not user_config.marks_enabled
+        await create_or_update_user(message.peer_id, marks_enabled=new_status)
+        await message.answer(f"🔔 Уведомления об оценках: {'✅ включены' if new_status else '❌ выключены'}", 
+                           keyboard=get_notification_keyboard(await get_user(message.peer_id)))
+
     # ===== Кнопка Назад =====
     @labeler.message(text="◀️ Назад")
     async def btn_back(message: Message):
@@ -931,21 +951,6 @@ def main() -> None:
         if current_state and current_state.startswith("select_child:"):
             action = current_state.split(":")[1]
             await handle_child_selection(message, text, action, bot)
-            return
-
-        # Кнопки уведомлений
-        if text.startswith("💰 Баланс:"):
-            user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
-            new_status = not user_config.enabled
-            await create_or_update_user(message.peer_id, enabled=new_status)
-            await message.answer(f"🔔 Баланс: {'✅ включено' if new_status else '❌ выключено'}", keyboard=get_notification_keyboard(await get_user(message.peer_id)))
-            return
-
-        if text.startswith("⭐ Оценки:"):
-            user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
-            new_status = not user_config.marks_enabled
-            await create_or_update_user(message.peer_id, marks_enabled=new_status)
-            await message.answer(f"🔔 Оценки: {'✅ включено' if new_status else '❌ выключено'}", keyboard=get_notification_keyboard(await get_user(message.peer_id)))
             return
 
     # ===== Запуск бота =====
