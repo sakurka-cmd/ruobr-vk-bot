@@ -96,6 +96,19 @@ def get_child_select_keyboard(children) -> str:
     return kb.get_json()
 
 
+def get_threshold_select_keyboard(children, thresholds: dict) -> str:
+    """Клавиатура для выбора ребёнка при настройке порога"""
+    kb = Keyboard(one_time=False, inline=False)
+    for i, child in enumerate(children):
+        if i > 0 and i % 2 == 0:
+            kb.row()
+        threshold = thresholds.get(child.id, 200)  # default 200
+        kb.add(Text(f"👤 {i+1}. {child.full_name[:15]} ({threshold:.0f}₽)"), color=KeyboardButtonColor.PRIMARY)
+    kb.row()
+    kb.add(Text("❌ Отмена"), color=KeyboardButtonColor.NEGATIVE)
+    return kb.get_json()
+
+
 def get_notification_keyboard(user_config) -> str:
     balance_status = "✅" if user_config.enabled else "❌"
     marks_status = "✅" if user_config.marks_enabled else "❌"
@@ -309,7 +322,7 @@ async def handle_child_selection(message: Message, text: str, action: str, bot):
         await message.answer(f"❌ Неверный номер. Введите от 1 до {len(children)}.")
         return
     child = children[idx - 1]
-    await clear_user_state(bot.state_dispenser, message.peer_id)
+    # НЕ очищаем состояние - чтобы можно было выбрать другого ребёнка
     user_config = await get_user(message.peer_id)
     if action == "classmates":
         await show_classmates(message, user_config.login, user_config.password, idx - 1, child["name"])
@@ -317,6 +330,11 @@ async def handle_child_selection(message: Message, text: str, action: str, bot):
         await show_teachers(message, user_config.login, user_config.password, idx - 1, child["name"])
     elif action == "achievements":
         await show_achievements(message, user_config.login, user_config.password, idx - 1, child["name"])
+    elif action == "threshold":
+        # Для порога - переходим к вводу значения
+        current_threshold = await get_child_threshold(message.peer_id, child["id"])
+        await set_user_state(bot.state_dispenser, message.peer_id, "threshold:waiting_for_value", {**payload, "selected_child_id": child["id"], "selected_child_name": child["name"]})
+        await message.answer(f"👶 Выбран: {child['name']} ({child['group']})\nТекущий порог: {current_threshold:.0f} ₽\n\nВведите новый порог (число):", keyboard=get_cancel_keyboard())
 
 
 def main() -> None:
@@ -421,13 +439,8 @@ def main() -> None:
             return
         login, password, children = result
         thresholds = await get_all_thresholds_for_peer(message.peer_id)
-        lines = ["⚙️ Настройка порога баланса\n", "Выберите ребёнка:\n"]
-        for idx, child in enumerate(children, 1):
-            threshold = thresholds.get(child.id, config.default_balance_threshold)
-            lines.append(f"{idx}. {child.full_name} ({child.group}) — {threshold:.0f} ₽")
-        lines.append("\n📝 Введите номер ребёнка.")
-        await set_user_state(bot.state_dispenser, message.peer_id, "threshold:waiting_for_child_selection", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
-        await message.answer("\n".join(lines), keyboard=get_cancel_keyboard())
+        await set_user_state(bot.state_dispenser, message.peer_id, "select_child:threshold", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
+        await message.answer("⚙️ Настройка порога баланса\n\n👦👧 Выберите ребёнка:", keyboard=get_threshold_select_keyboard(children, thresholds))
 
     @labeler.message(text="/ttoday")
     async def cmd_ttoday(message: Message):
@@ -724,13 +737,8 @@ def main() -> None:
             return
         login, password, children = result
         thresholds = await get_all_thresholds_for_peer(message.peer_id)
-        lines = ["⚙️ Настройка порога баланса\n", "Выберите ребёнка:\n"]
-        for idx, child in enumerate(children, 1):
-            threshold = thresholds.get(child.id, config.default_balance_threshold)
-            lines.append(f"{idx}. {child.full_name} ({child.group}) — {threshold:.0f} ₽")
-        lines.append("\n📝 Введите номер ребёнка.")
-        await set_user_state(bot.state_dispenser, message.peer_id, "threshold:waiting_for_child_selection", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
-        await message.answer("\n".join(lines), keyboard=get_cancel_keyboard())
+        await set_user_state(bot.state_dispenser, message.peer_id, "select_child:threshold", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
+        await message.answer("⚙️ Настройка порога баланса\n\n👦👧 Выберите ребёнка:", keyboard=get_threshold_select_keyboard(children, thresholds))
 
     @labeler.message(text="🔔 Уведомления")
     async def btn_notifications(message: Message):
@@ -903,28 +911,6 @@ def main() -> None:
                 logger.error(f"Login error: {e}")
                 await status_msg.edit("❌ Ошибка соединения!")
             await clear_user_state(bot.state_dispenser, message.peer_id)
-            return
-
-        # Выбор порога - ребенок
-        if current_state == "threshold:waiting_for_child_selection":
-            payload = await get_state_payload(bot.state_dispenser, message.peer_id)
-            if not payload:
-                await clear_user_state(bot.state_dispenser, message.peer_id)
-                await message.answer("❌ Ошибка. Начните заново с /set_threshold", keyboard=get_main_keyboard())
-                return
-            children = payload.get("children", [])
-            try:
-                idx = int(text)
-            except ValueError:
-                await message.answer("❌ Введите номер ребёнка (число).")
-                return
-            if idx < 1 or idx > len(children):
-                await message.answer(f"❌ Неверный номер. Введите от 1 до {len(children)}.")
-                return
-            child = children[idx - 1]
-            current_threshold = await get_child_threshold(message.peer_id, child["id"])
-            await set_user_state(bot.state_dispenser, message.peer_id, "threshold:waiting_for_value", {**payload, "selected_child_id": child["id"], "selected_child_name": child["name"]})
-            await message.answer(f"👶 Выбран: {child['name']} ({child['group']})\nТекущий порог: {current_threshold:.0f} ₽\n\nВведите новый порог (число):", keyboard=get_cancel_keyboard())
             return
 
         # Ввод порога
