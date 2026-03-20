@@ -26,7 +26,7 @@ def setup_logging() -> None:
             logging.FileHandler(config.data_dir / "bot.log", encoding="utf-8")
         ]
     )
-    logging.getLogger("vkbottle").setLevel(logging.DEBUG)  # Временно для отладки
+    logging.getLogger("vkbottle").setLevel(logging.WARNING)
 
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ def get_notification_keyboard(user_config) -> str:
 
 # ===== Утилиты для FSM =====
 
-# Хранилище payload для состояний (в vkbottle 4.x BuiltinStateDispenser не поддерживает payload)
+# Хранилище payload для состояний
 _state_payloads: dict[int, dict] = {}
 
 
@@ -141,7 +141,7 @@ async def get_state_payload(dispenser, peer_id: int):
 # ===== Вспомогательные функции =====
 
 class StatusMessage:
-    """Обёртка для редактирования сообщений через API (vkbottle 4.x compatibility)"""
+    """Обёртка для редактирования сообщений через API"""
     def __init__(self, api, peer_id: int, message_id: int):
         self.api = api
         self.peer_id = peer_id
@@ -161,17 +161,14 @@ class StatusMessage:
 async def send_status(message: Message, text: str = "🔄 Загрузка...") -> StatusMessage:
     """Отправить статусное сообщение с возможностью редактирования"""
     result = await message.answer(text)
-    # В vkbottle 4.x answer возвращает кортеж/список MessagesSendUserIdsResponseItem
     msg_id = 0
     if result:
-        # Если это итерируемый объект (список/кортеж)
         if isinstance(result, (list, tuple)) and len(result) > 0:
             item = result[0]
             if hasattr(item, 'message_id'):
                 msg_id = item.message_id
             elif hasattr(item, 'conversation_message_id'):
                 msg_id = item.conversation_message_id
-        # Если это одиночный объект
         elif hasattr(result, 'message_id'):
             msg_id = result.message_id
         elif hasattr(result, 'conversation_message_id'):
@@ -326,9 +323,12 @@ def main() -> None:
 
     bot = Bot(token=config.vk_token)
     labeler = bot.labeler
-    logger.info(f"Bot initialized")
+    logger.info("Bot initialized")
 
-    # ===== Команда /start =====
+    # ===== ВСЕ ОБРАБОТЧИКИ РЕГИСТРИРУЮТСЯ ПО ПОРЯДКУ =====
+    # Сначала специфичные обработчики (кнопки, команды), потом общий
+    
+    # ===== Команды =====
     @labeler.message(text="/start")
     async def cmd_start(message: Message):
         user_config = await create_or_update_user(message.peer_id)
@@ -343,20 +343,496 @@ def main() -> None:
         text += "📖 Команды:\n/set_login — настроить логин/пароль\n/balance — баланс питания\n/ttoday — расписание сегодня\n/ttomorrow — расписание завтра"
         await message.answer(text, keyboard=get_main_keyboard())
 
-    # ===== Команда /set_login =====
     @labeler.message(text="/set_login")
     async def cmd_set_login(message: Message):
         await set_user_state(bot.state_dispenser, message.peer_id, "login:waiting_for_login")
         await message.answer("🔐 Настройка учётных данных\n\nВведите логин от cabinet.ruobr.ru:\n\n❌ Отмена — для выхода", keyboard=get_cancel_keyboard())
 
-    # ===== Обработчик всех сообщений (для FSM) =====
+    @labeler.message(text="/cancel")
+    async def cmd_cancel(message: Message):
+        await clear_user_state(bot.state_dispenser, message.peer_id)
+        await message.answer("❌ Операция отменена.", keyboard=get_main_keyboard())
+
+    @labeler.message(text="/enable")
+    async def cmd_enable(message: Message):
+        await create_or_update_user(message.peer_id, enabled=True, marks_enabled=True)
+        await message.answer("🔔 Уведомления включены!")
+
+    @labeler.message(text="/disable")
+    async def cmd_disable(message: Message):
+        await create_or_update_user(message.peer_id, enabled=False, marks_enabled=False)
+        await message.answer("🔕 Уведомления отключены.")
+
+    @labeler.message(text="/balance")
+    async def cmd_balance(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            food_info = await get_food_for_children(login, password, children)
+            thresholds = await get_all_thresholds_for_peer(message.peer_id)
+            lines = ["💰 Баланс питания\n"]
+            for idx, child in enumerate(children, 1):
+                info = food_info.get(child.id)
+                threshold = thresholds.get(child.id, config.default_balance_threshold)
+                if info and info.has_food:
+                    lines.append(f"{idx}. {format_balance(child, info.balance, threshold)}")
+                else:
+                    lines.append(f"{idx}. {child.full_name} ({child.group}): питание недоступно")
+            lines.append("\n💡 Настройте порог через /set_threshold")
+            await status_msg.edit("\n".join(lines))
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="/foodtoday")
+    async def cmd_foodtoday(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            today_str = date.today().strftime("%Y-%m-%d")
+            food_info = await get_food_for_children(login, password, children)
+            lines = [f"🍽 Питание сегодня ({format_date(today_str)})"]
+            found = False
+            for child in children:
+                info = food_info.get(child.id)
+                if info and info.visits:
+                    for visit in info.visits:
+                        if visit.get("date") == today_str and (visit.get("ordered") or visit.get("state") == 30):
+                            found = True
+                            lines.append(format_food_visit(visit, child.full_name))
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else f"ℹ️ На сегодня питания не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="/set_threshold")
+    async def cmd_set_threshold(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        thresholds = await get_all_thresholds_for_peer(message.peer_id)
+        lines = ["⚙️ Настройка порога баланса\n", "Выберите ребёнка:\n"]
+        for idx, child in enumerate(children, 1):
+            threshold = thresholds.get(child.id, config.default_balance_threshold)
+            lines.append(f"{idx}. {child.full_name} ({child.group}) — {threshold:.0f} ₽")
+        lines.append("\n📝 Введите номер ребёнка.")
+        await set_user_state(bot.state_dispenser, message.peer_id, "threshold:waiting_for_child_selection", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
+        await message.answer("\n".join(lines), keyboard=get_cancel_keyboard())
+
+    @labeler.message(text="/ttoday")
+    async def cmd_ttoday(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            today = date.today()
+            timetable = await get_timetable_for_children(login, password, children, today, today)
+            lines = [f"📅 Расписание на сегодня ({format_date(str(today))}, {format_weekday(today)})"]
+            found = False
+            for child in children:
+                lessons = timetable.get(child.id, [])
+                if lessons:
+                    found = True
+                    lines.append(f"\n👦 {child.full_name} ({child.group}):")
+                    for lesson in lessons:
+                        lines.append(format_lesson(lesson, show_details=True))
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ На сегодня расписание не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="/ttomorrow")
+    async def cmd_ttomorrow(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            tomorrow = date.today() + timedelta(days=1)
+            timetable = await get_timetable_for_children(login, password, children, tomorrow, tomorrow)
+            lines = [f"📅 Расписание на завтра ({format_date(str(tomorrow))}, {format_weekday(tomorrow)})"]
+            found = False
+            for child in children:
+                lessons = timetable.get(child.id, [])
+                if lessons:
+                    found = True
+                    lines.append(f"\n👦 {child.full_name} ({child.group}):")
+                    for lesson in lessons:
+                        lines.append(format_lesson(lesson, show_details=True))
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ На завтра расписание не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="/hwtomorrow")
+    async def cmd_hwtomorrow(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            today = date.today()
+            tomorrow = today + timedelta(days=1)
+            tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+            monday = today - timedelta(days=today.weekday())
+            sunday = monday + timedelta(days=6)
+            timetable = await get_timetable_for_children(login, password, children, monday, sunday)
+            lines = [f"📘 Домашнее задание на завтра ({format_date(tomorrow_str)})"]
+            found = False
+            for child in children:
+                lessons = timetable.get(child.id, [])
+                child_header_added = False
+                for lesson in lessons:
+                    for hw in lesson.homework:
+                        if hw.get("deadline") == tomorrow_str:
+                            if not child_header_added:
+                                lines.append(f"\n👦 {child.full_name} ({child.group}):")
+                                child_header_added = True
+                            found = True
+                            lines.append(f"  📖 {lesson.subject}: {hw.get('title', '')}")
+                            hw_text = hw.get("text", "")
+                            if has_meaningful_text(hw_text):
+                                clean_text = clean_html_text(hw_text)[:500]
+                                lines.append(f"     📝 {clean_text}")
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ На завтра ДЗ не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="/markstoday")
+    async def cmd_markstoday(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            today = date.today()
+            timetable = await get_timetable_for_children(login, password, children, today, today)
+            lines = [f"⭐ Оценки за сегодня ({format_date(str(today))})"]
+            found = False
+            for child in children:
+                lessons = timetable.get(child.id, [])
+                child_header_added = False
+                for lesson in lessons:
+                    if lesson.marks:
+                        if not child_header_added:
+                            lines.append(f"\n👦 {child.full_name} ({child.group}):")
+                            child_header_added = True
+                        for mark in lesson.marks:
+                            found = True
+                            lines.append(f"  {format_mark(mark, lesson.subject)}")
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ За сегодня оценок не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    # ===== Кнопки главного меню =====
+    @labeler.message(text="📅 Расписание сегодня")
+    async def btn_ttoday(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            today = date.today()
+            timetable = await get_timetable_for_children(login, password, children, today, today)
+            lines = [f"📅 Расписание на сегодня ({format_date(str(today))}, {format_weekday(today)})"]
+            found = False
+            for child in children:
+                lessons = timetable.get(child.id, [])
+                if lessons:
+                    found = True
+                    lines.append(f"\n👦 {child.full_name} ({child.group}):")
+                    for lesson in lessons:
+                        lines.append(format_lesson(lesson, show_details=True))
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ На сегодня расписание не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="📅 Расписание завтра")
+    async def btn_ttomorrow(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            tomorrow = date.today() + timedelta(days=1)
+            timetable = await get_timetable_for_children(login, password, children, tomorrow, tomorrow)
+            lines = [f"📅 Расписание на завтра ({format_date(str(tomorrow))}, {format_weekday(tomorrow)})"]
+            found = False
+            for child in children:
+                lessons = timetable.get(child.id, [])
+                if lessons:
+                    found = True
+                    lines.append(f"\n👦 {child.full_name} ({child.group}):")
+                    for lesson in lessons:
+                        lines.append(format_lesson(lesson, show_details=True))
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ На завтра расписание не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="📘 ДЗ на завтра")
+    async def btn_hwtomorrow(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            today = date.today()
+            tomorrow = today + timedelta(days=1)
+            tomorrow_str = tomorrow.strftime("%Y-%m-%d")
+            monday = today - timedelta(days=today.weekday())
+            sunday = monday + timedelta(days=6)
+            timetable = await get_timetable_for_children(login, password, children, monday, sunday)
+            lines = [f"📘 Домашнее задание на завтра ({format_date(tomorrow_str)})"]
+            found = False
+            for child in children:
+                lessons = timetable.get(child.id, [])
+                child_header_added = False
+                for lesson in lessons:
+                    for hw in lesson.homework:
+                        if hw.get("deadline") == tomorrow_str:
+                            if not child_header_added:
+                                lines.append(f"\n👦 {child.full_name} ({child.group}):")
+                                child_header_added = True
+                            found = True
+                            lines.append(f"  📖 {lesson.subject}: {hw.get('title', '')}")
+                            hw_text = hw.get("text", "")
+                            if has_meaningful_text(hw_text):
+                                clean_text = clean_html_text(hw_text)[:500]
+                                lines.append(f"     📝 {clean_text}")
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ На завтра ДЗ не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="⭐ Оценки сегодня")
+    async def btn_markstoday(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            today = date.today()
+            timetable = await get_timetable_for_children(login, password, children, today, today)
+            lines = [f"⭐ Оценки за сегодня ({format_date(str(today))})"]
+            found = False
+            for child in children:
+                lessons = timetable.get(child.id, [])
+                child_header_added = False
+                for lesson in lessons:
+                    if lesson.marks:
+                        if not child_header_added:
+                            lines.append(f"\n👦 {child.full_name} ({child.group}):")
+                            child_header_added = True
+                        for mark in lesson.marks:
+                            found = True
+                            lines.append(f"  {format_mark(mark, lesson.subject)}")
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ За сегодня оценок не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="💰 Баланс питания")
+    async def btn_balance(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            food_info = await get_food_for_children(login, password, children)
+            thresholds = await get_all_thresholds_for_peer(message.peer_id)
+            lines = ["💰 Баланс питания\n"]
+            for idx, child in enumerate(children, 1):
+                info = food_info.get(child.id)
+                threshold = thresholds.get(child.id, config.default_balance_threshold)
+                if info and info.has_food:
+                    lines.append(f"{idx}. {format_balance(child, info.balance, threshold)}")
+                else:
+                    lines.append(f"{idx}. {child.full_name} ({child.group}): питание недоступно")
+            lines.append("\n💡 Настройте порог через /set_threshold")
+            await status_msg.edit("\n".join(lines))
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="🍽 Питание сегодня")
+    async def btn_foodtoday(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        status_msg = await send_status(message)
+        try:
+            today_str = date.today().strftime("%Y-%m-%d")
+            food_info = await get_food_for_children(login, password, children)
+            lines = [f"🍽 Питание сегодня ({format_date(today_str)})"]
+            found = False
+            for child in children:
+                info = food_info.get(child.id)
+                if info and info.visits:
+                    for visit in info.visits:
+                        if visit.get("date") == today_str and (visit.get("ordered") or visit.get("state") == 30):
+                            found = True
+                            lines.append(format_food_visit(visit, child.full_name))
+            await status_msg.edit(truncate_text("\n".join(lines)) if found else f"ℹ️ На сегодня питания не найдено.")
+        except Exception as e:
+            await status_msg.edit(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="⚙️ Настройки")
+    async def btn_settings(message: Message):
+        await message.answer("⚙️ Настройки", keyboard=get_settings_keyboard())
+
+    @labeler.message(text="ℹ️ Информация")
+    async def btn_info(message: Message):
+        await message.answer("ℹ️ Информация\n\nВыберите что хотите узнать:", keyboard=get_info_keyboard())
+
+    # ===== Кнопки настроек =====
+    @labeler.message(text="🔑 Изменить логин/пароль")
+    async def btn_change_login(message: Message):
+        await set_user_state(bot.state_dispenser, message.peer_id, "login:waiting_for_login")
+        await message.answer("🔐 Настройка учётных данных\n\nВведите логин от cabinet.ruobr.ru:\n\n❌ Отмена — для выхода", keyboard=get_cancel_keyboard())
+
+    @labeler.message(text="💰 Порог баланса")
+    async def btn_set_threshold(message: Message):
+        user_config = await get_user(message.peer_id)
+        result = await require_authentication(message, user_config)
+        if not result:
+            return
+        login, password, children = result
+        thresholds = await get_all_thresholds_for_peer(message.peer_id)
+        lines = ["⚙️ Настройка порога баланса\n", "Выберите ребёнка:\n"]
+        for idx, child in enumerate(children, 1):
+            threshold = thresholds.get(child.id, config.default_balance_threshold)
+            lines.append(f"{idx}. {child.full_name} ({child.group}) — {threshold:.0f} ₽")
+        lines.append("\n📝 Введите номер ребёнка.")
+        await set_user_state(bot.state_dispenser, message.peer_id, "threshold:waiting_for_child_selection", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
+        await message.answer("\n".join(lines), keyboard=get_cancel_keyboard())
+
+    @labeler.message(text="🔔 Уведомления")
+    async def btn_notifications(message: Message):
+        user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
+        await message.answer("🔔 Настройки уведомлений\n\nНажмите для включения/выключения:", keyboard=get_notification_keyboard(user_config))
+
+    @labeler.message(text="👤 Мой профиль")
+    async def btn_profile(message: Message):
+        user_config = await get_user(message.peer_id)
+        if not user_config:
+            await message.answer("Профиль не найден. Используйте /start", keyboard=get_main_keyboard())
+            return
+        status = "✅ Настроен" if user_config.login and user_config.password else "❌ Не настроен"
+        await message.answer(f"👤 Ваш профиль\n\nСтатус: {status}\nЛогин: {user_config.login or 'не указан'}\n\n"
+                            f"Уведомления о балансе: {'🔔 Включены' if user_config.enabled else '🔕 Выключены'}\n"
+                            f"Уведомления об оценках: {'🔔 Включены' if user_config.marks_enabled else '🔕 Выключены'}", keyboard=get_settings_keyboard())
+
+    # ===== Кнопки информации =====
+    @labeler.message(text="👥 Одноклассники")
+    async def btn_classmates(message: Message):
+        user_config = await get_user(message.peer_id)
+        if not user_config or not user_config.login:
+            await message.answer("❌ Сначала настройте логин/пароль через /set_login", keyboard=get_main_keyboard())
+            return
+        try:
+            children = await get_children_async(user_config.login, user_config.password)
+            if not children:
+                await message.answer("❌ Дети не найдены.")
+                return
+            if len(children) == 1:
+                await show_classmates(message, user_config.login, user_config.password, 0, children[0].full_name)
+            else:
+                await set_user_state(bot.state_dispenser, message.peer_id, "select_child:classmates", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
+                await message.answer("👦👧 Выберите ребенка:", keyboard=get_child_select_keyboard(children))
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="👩‍🏫 Учителя")
+    async def btn_teachers(message: Message):
+        user_config = await get_user(message.peer_id)
+        if not user_config or not user_config.login:
+            await message.answer("❌ Сначала настройте логин/пароль через /set_login", keyboard=get_main_keyboard())
+            return
+        try:
+            children = await get_children_async(user_config.login, user_config.password)
+            if not children:
+                await message.answer("❌ Дети не найдены.")
+                return
+            if len(children) == 1:
+                await show_teachers(message, user_config.login, user_config.password, 0, children[0].full_name)
+            else:
+                await set_user_state(bot.state_dispenser, message.peer_id, "select_child:teachers", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
+                await message.answer("👦👧 Выберите ребенка:", keyboard=get_child_select_keyboard(children))
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="🏆 Достижения")
+    async def btn_achievements(message: Message):
+        user_config = await get_user(message.peer_id)
+        if not user_config or not user_config.login:
+            await message.answer("❌ Сначала настройте логин/пароль через /set_login", keyboard=get_main_keyboard())
+            return
+        try:
+            children = await get_children_async(user_config.login, user_config.password)
+            if not children:
+                await message.answer("❌ Дети не найдены.")
+                return
+            if len(children) == 1:
+                await show_achievements(message, user_config.login, user_config.password, 0, children[0].full_name)
+            else:
+                await set_user_state(bot.state_dispenser, message.peer_id, "select_child:achievements", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
+                await message.answer("👦👧 Выберите ребенка:", keyboard=get_child_select_keyboard(children))
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+
+    @labeler.message(text="📋 Справка")
+    async def btn_help(message: Message):
+        await message.answer("📋 Справка по боту\n\nШкольный бот — помогает родителям следить за учёбой детей.\n\n"
+                            "📅 Расписание:\n• «Расписание сегодня» — уроки на сегодня\n• «Расписание завтра» — уроки на завтра\n\n"
+                            "📘 Домашние задания:\n• «ДЗ на завтра» — задания на завтрашний день\n\n"
+                            "⭐ Оценки:\n• «Оценки сегодня» — оценки за сегодняшний день\n\n"
+                            "🍽 Питание:\n• «Баланс питания» — текущий баланс счёта\n• «Питание сегодня» — что ребёнок ел сегодня\n\n"
+                            "📝 Команды:\n/start — главное меню\n/set_login — настроить учётные данные\n/balance — баланс питания\n/ttoday — расписание сегодня\n/ttomorrow — расписание завтра")
+
+    # ===== Кнопка Отмена (из любого состояния) =====
+    @labeler.message(text="❌ Отмена")
+    async def btn_cancel(message: Message):
+        await clear_user_state(bot.state_dispenser, message.peer_id)
+        await message.answer("❌ Операция отменена.", keyboard=get_main_keyboard())
+
+    # ===== Кнопка Назад =====
+    @labeler.message(text="◀️ Назад")
+    async def btn_back(message: Message):
+        await clear_user_state(bot.state_dispenser, message.peer_id)
+        await message.answer("🏠 Главное меню", keyboard=get_main_keyboard())
+
+    # ===== Обработчик ВСЕХ сообщений (регистрируется ПОСЛЕДНИМ!) =====
+    # Он нужен для FSM (состояний ввода логина/пароля и т.д.)
     @labeler.message()
     async def handle_all_messages(message: Message):
         current_state = await get_user_state(bot.state_dispenser, message.peer_id)
         text = message.text.strip() if message.text else ""
-        logger.info(f"Message: '{text}', state: {current_state}")
         
-        # Если нет состояния - пропускаем
+        # Если нет состояния - ничего не делаем (кнопки уже обработаны выше)
         if not current_state:
             return
 
@@ -473,309 +949,6 @@ def main() -> None:
             await message.answer(f"🔔 Оценки: {'✅ включено' if new_status else '❌ выключено'}", keyboard=get_notification_keyboard(await get_user(message.peer_id)))
             return
 
-    # ===== Кнопки =====
-    @labeler.message(text="/cancel")
-    @labeler.message(text="❌ Отмена")
-    async def cmd_cancel(message: Message):
-        await clear_user_state(bot.state_dispenser, message.peer_id)
-        await message.answer("❌ Операция отменена.", keyboard=get_main_keyboard())
-
-    @labeler.message(text="ℹ️ Информация")
-    async def btn_info(message: Message):
-        await message.answer("ℹ️ Информация\n\nВыберите что хотите узнать:", keyboard=get_info_keyboard())
-
-    @labeler.message(text="⚙️ Настройки")
-    async def btn_settings(message: Message):
-        await message.answer("⚙️ Настройки", keyboard=get_settings_keyboard())
-
-    @labeler.message(text="🔑 Изменить логин/пароль")
-    async def btn_change_login(message: Message):
-        await set_user_state(bot.state_dispenser, message.peer_id, "login:waiting_for_login")
-        await message.answer("🔐 Настройка учётных данных\n\nВведите логин от cabinet.ruobr.ru:\n\n❌ Отмена — для выхода", keyboard=get_cancel_keyboard())
-
-    @labeler.message(text="👥 Одноклассники")
-    async def btn_classmates(message: Message):
-        user_config = await get_user(message.peer_id)
-        if not user_config or not user_config.login:
-            await message.answer("❌ Сначала настройте логин/пароль через /set_login", keyboard=get_main_keyboard())
-            return
-        try:
-            children = await get_children_async(user_config.login, user_config.password)
-            if not children:
-                await message.answer("❌ Дети не найдены.")
-                return
-            if len(children) == 1:
-                await show_classmates(message, user_config.login, user_config.password, 0, children[0].full_name)
-            else:
-                await set_user_state(bot.state_dispenser, message.peer_id, "select_child:classmates", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
-                await message.answer("👦👧 Выберите ребенка:", keyboard=get_child_select_keyboard(children))
-        except Exception as e:
-            await message.answer(f"❌ Ошибка: {e}")
-
-    @labeler.message(text="👩‍🏫 Учителя")
-    async def btn_teachers(message: Message):
-        user_config = await get_user(message.peer_id)
-        if not user_config or not user_config.login:
-            await message.answer("❌ Сначала настройте логин/пароль через /set_login", keyboard=get_main_keyboard())
-            return
-        try:
-            children = await get_children_async(user_config.login, user_config.password)
-            if not children:
-                await message.answer("❌ Дети не найдены.")
-                return
-            if len(children) == 1:
-                await show_teachers(message, user_config.login, user_config.password, 0, children[0].full_name)
-            else:
-                await set_user_state(bot.state_dispenser, message.peer_id, "select_child:teachers", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
-                await message.answer("👦👧 Выберите ребенка:", keyboard=get_child_select_keyboard(children))
-        except Exception as e:
-            await message.answer(f"❌ Ошибка: {e}")
-
-    @labeler.message(text="🏆 Достижения")
-    async def btn_achievements(message: Message):
-        user_config = await get_user(message.peer_id)
-        if not user_config or not user_config.login:
-            await message.answer("❌ Сначала настройте логин/пароль через /set_login", keyboard=get_main_keyboard())
-            return
-        try:
-            children = await get_children_async(user_config.login, user_config.password)
-            if not children:
-                await message.answer("❌ Дети не найдены.")
-                return
-            if len(children) == 1:
-                await show_achievements(message, user_config.login, user_config.password, 0, children[0].full_name)
-            else:
-                await set_user_state(bot.state_dispenser, message.peer_id, "select_child:achievements", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
-                await message.answer("👦👧 Выберите ребенка:", keyboard=get_child_select_keyboard(children))
-        except Exception as e:
-            await message.answer(f"❌ Ошибка: {e}")
-
-    @labeler.message(text="📋 Справка")
-    async def btn_help(message: Message):
-        await message.answer("📋 Справка по боту\n\nШкольный бот — помогает родителям следить за учёбой детей.\n\n"
-                            "📅 Расписание:\n• «Расписание сегодня» — уроки на сегодня\n• «Расписание завтра» — уроки на завтра\n\n"
-                            "📘 Домашние задания:\n• «ДЗ на завтра» — задания на завтрашний день\n\n"
-                            "⭐ Оценки:\n• «Оценки сегодня» — оценки за сегодняшний день\n\n"
-                            "🍽 Питание:\n• «Баланс питания» — текущий баланс счёта\n• «Питание сегодня» — что ребёнок ел сегодня\n\n"
-                            "📝 Команды:\n/start — главное меню\n/set_login — настроить учётные данные\n/balance — баланс питания\n/ttoday — расписание сегодня\n/ttomorrow — расписание завтра")
-
-    @labeler.message(text="◀️ Назад")
-    async def btn_back(message: Message):
-        await clear_user_state(bot.state_dispenser, message.peer_id)
-        await message.answer("🏠 Главное меню", keyboard=get_main_keyboard())
-
-    @labeler.message(text="👤 Мой профиль")
-    async def btn_profile(message: Message):
-        user_config = await get_user(message.peer_id)
-        if not user_config:
-            await message.answer("Профиль не найден. Используйте /start", keyboard=get_main_keyboard())
-            return
-        status = "✅ Настроен" if user_config.login and user_config.password else "❌ Не настроен"
-        await message.answer(f"👤 Ваш профиль\n\nСтатус: {status}\nЛогин: {user_config.login or 'не указан'}\n\n"
-                            f"Уведомления о балансе: {'🔔 Включены' if user_config.enabled else '🔕 Выключены'}\n"
-                            f"Уведомления об оценках: {'🔔 Включены' if user_config.marks_enabled else '🔕 Выключены'}", keyboard=get_settings_keyboard())
-
-    @labeler.message(text="/enable")
-    async def cmd_enable(message: Message):
-        await create_or_update_user(message.peer_id, enabled=True, marks_enabled=True)
-        await message.answer("🔔 Уведомления включены!")
-
-    @labeler.message(text="/disable")
-    async def cmd_disable(message: Message):
-        await create_or_update_user(message.peer_id, enabled=False, marks_enabled=False)
-        await message.answer("🔕 Уведомления отключены.")
-
-    @labeler.message(text="🔔 Уведомления")
-    async def btn_notifications(message: Message):
-        user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
-        await message.answer("🔔 Настройки уведомлений\n\nНажмите для включения/выключения:", keyboard=get_notification_keyboard(user_config))
-
-    # ===== Баланс питания =====
-    @labeler.message(text="/balance")
-    @labeler.message(text="💰 Баланс питания")
-    async def cmd_balance(message: Message):
-        user_config = await get_user(message.peer_id)
-        result = await require_authentication(message, user_config)
-        if not result:
-            return
-        login, password, children = result
-        status_msg = await send_status(message)
-        try:
-            food_info = await get_food_for_children(login, password, children)
-            thresholds = await get_all_thresholds_for_peer(message.peer_id)
-            lines = ["💰 Баланс питания\n"]
-            for idx, child in enumerate(children, 1):
-                info = food_info.get(child.id)
-                threshold = thresholds.get(child.id, config.default_balance_threshold)
-                if info and info.has_food:
-                    lines.append(f"{idx}. {format_balance(child, info.balance, threshold)}")
-                else:
-                    lines.append(f"{idx}. {child.full_name} ({child.group}): питание недоступно")
-            lines.append("\n💡 Настройте порог через /set_threshold")
-            await status_msg.edit("\n".join(lines))
-        except Exception as e:
-            await status_msg.edit(f"❌ Ошибка: {e}")
-
-    @labeler.message(text="/foodtoday")
-    @labeler.message(text="🍽 Питание сегодня")
-    async def cmd_foodtoday(message: Message):
-        user_config = await get_user(message.peer_id)
-        result = await require_authentication(message, user_config)
-        if not result:
-            return
-        login, password, children = result
-        status_msg = await send_status(message)
-        try:
-            today_str = date.today().strftime("%Y-%m-%d")
-            food_info = await get_food_for_children(login, password, children)
-            lines = [f"🍽 Питание сегодня ({format_date(today_str)})"]
-            found = False
-            for child in children:
-                info = food_info.get(child.id)
-                if info and info.visits:
-                    for visit in info.visits:
-                        if visit.get("date") == today_str and (visit.get("ordered") or visit.get("state") == 30):
-                            found = True
-                            lines.append(format_food_visit(visit, child.full_name))
-            await status_msg.edit(truncate_text("\n".join(lines)) if found else f"ℹ️ На сегодня питания не найдено.")
-        except Exception as e:
-            await status_msg.edit(f"❌ Ошибка: {e}")
-
-    # ===== Порог баланса =====
-    @labeler.message(text="/set_threshold")
-    @labeler.message(text="💰 Порог баланса")
-    async def cmd_set_threshold(message: Message):
-        user_config = await get_user(message.peer_id)
-        result = await require_authentication(message, user_config)
-        if not result:
-            return
-        login, password, children = result
-        thresholds = await get_all_thresholds_for_peer(message.peer_id)
-        lines = ["⚙️ Настройка порога баланса\n", "Выберите ребёнка:\n"]
-        for idx, child in enumerate(children, 1):
-            threshold = thresholds.get(child.id, config.default_balance_threshold)
-            lines.append(f"{idx}. {child.full_name} ({child.group}) — {threshold:.0f} ₽")
-        lines.append("\n📝 Введите номер ребёнка.")
-        await set_user_state(bot.state_dispenser, message.peer_id, "threshold:waiting_for_child_selection", {"children": [{"id": c.id, "name": c.full_name, "group": c.group} for c in children]})
-        await message.answer("\n".join(lines), keyboard=get_cancel_keyboard())
-
-    # ===== Расписание =====
-    @labeler.message(text="/ttoday")
-    @labeler.message(text="📅 Расписание сегодня")
-    async def cmd_ttoday(message: Message):
-        user_config = await get_user(message.peer_id)
-        result = await require_authentication(message, user_config)
-        if not result:
-            return
-        login, password, children = result
-        status_msg = await send_status(message)
-        try:
-            today = date.today()
-            timetable = await get_timetable_for_children(login, password, children, today, today)
-            lines = [f"📅 Расписание на сегодня ({format_date(str(today))}, {format_weekday(today)})"]
-            found = False
-            for child in children:
-                lessons = timetable.get(child.id, [])
-                if lessons:
-                    found = True
-                    lines.append(f"\n👦 {child.full_name} ({child.group}):")
-                    for lesson in lessons:
-                        lines.append(format_lesson(lesson, show_details=True))
-            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ На сегодня расписание не найдено.")
-        except Exception as e:
-            await status_msg.edit(f"❌ Ошибка: {e}")
-
-    @labeler.message(text="/ttomorrow")
-    @labeler.message(text="📅 Расписание завтра")
-    async def cmd_ttomorrow(message: Message):
-        user_config = await get_user(message.peer_id)
-        result = await require_authentication(message, user_config)
-        if not result:
-            return
-        login, password, children = result
-        status_msg = await send_status(message)
-        try:
-            tomorrow = date.today() + timedelta(days=1)
-            timetable = await get_timetable_for_children(login, password, children, tomorrow, tomorrow)
-            lines = [f"📅 Расписание на завтра ({format_date(str(tomorrow))}, {format_weekday(tomorrow)})"]
-            found = False
-            for child in children:
-                lessons = timetable.get(child.id, [])
-                if lessons:
-                    found = True
-                    lines.append(f"\n👦 {child.full_name} ({child.group}):")
-                    for lesson in lessons:
-                        lines.append(format_lesson(lesson, show_details=True))
-            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ На завтра расписание не найдено.")
-        except Exception as e:
-            await status_msg.edit(f"❌ Ошибка: {e}")
-
-    @labeler.message(text="/hwtomorrow")
-    @labeler.message(text="📘 ДЗ на завтра")
-    async def cmd_hwtomorrow(message: Message):
-        user_config = await get_user(message.peer_id)
-        result = await require_authentication(message, user_config)
-        if not result:
-            return
-        login, password, children = result
-        status_msg = await send_status(message)
-        try:
-            today = date.today()
-            tomorrow = today + timedelta(days=1)
-            tomorrow_str = tomorrow.strftime("%Y-%m-%d")
-            monday = today - timedelta(days=today.weekday())
-            sunday = monday + timedelta(days=6)
-            timetable = await get_timetable_for_children(login, password, children, monday, sunday)
-            lines = [f"📘 Домашнее задание на завтра ({format_date(tomorrow_str)})"]
-            found = False
-            for child in children:
-                lessons = timetable.get(child.id, [])
-                child_header_added = False
-                for lesson in lessons:
-                    for hw in lesson.homework:
-                        if hw.get("deadline") == tomorrow_str:
-                            if not child_header_added:
-                                lines.append(f"\n👦 {child.full_name} ({child.group}):")
-                                child_header_added = True
-                            found = True
-                            lines.append(f"  📖 {lesson.subject}: {hw.get('title', '')}")
-                            hw_text = hw.get("text", "")
-                            if has_meaningful_text(hw_text):
-                                clean_text = clean_html_text(hw_text)[:500]
-                                lines.append(f"     📝 {clean_text}")
-            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ На завтра ДЗ не найдено.")
-        except Exception as e:
-            await status_msg.edit(f"❌ Ошибка: {e}")
-
-    @labeler.message(text="/markstoday")
-    @labeler.message(text="⭐ Оценки сегодня")
-    async def cmd_markstoday(message: Message):
-        user_config = await get_user(message.peer_id)
-        result = await require_authentication(message, user_config)
-        if not result:
-            return
-        login, password, children = result
-        status_msg = await send_status(message)
-        try:
-            today = date.today()
-            timetable = await get_timetable_for_children(login, password, children, today, today)
-            lines = [f"⭐ Оценки за сегодня ({format_date(str(today))})"]
-            found = False
-            for child in children:
-                lessons = timetable.get(child.id, [])
-                child_header_added = False
-                for lesson in lessons:
-                    if lesson.marks:
-                        if not child_header_added:
-                            lines.append(f"\n👦 {child.full_name} ({child.group}):")
-                            child_header_added = True
-                        for mark in lesson.marks:
-                            found = True
-                            lines.append(f"  {format_mark(mark, lesson.subject)}")
-            await status_msg.edit(truncate_text("\n".join(lines)) if found else "ℹ️ За сегодня оценок не найдено.")
-        except Exception as e:
-            await status_msg.edit(f"❌ Ошибка: {e}")
-
     # ===== Запуск =====
     async def on_startup():
         await db_pool.initialize()
@@ -785,7 +958,6 @@ def main() -> None:
         await db_pool.close()
         logger.info("Bot stopped")
 
-    # Добавляем задачи в loop_wrapper
     bot.loop_wrapper.on_startup.append(on_startup())
     bot.loop_wrapper.on_shutdown.append(on_shutdown())
     bot.loop_wrapper.add_task(NotificationService(bot.api).start())
