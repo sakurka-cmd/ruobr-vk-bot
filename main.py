@@ -821,23 +821,6 @@ def main() -> None:
         await clear_user_state(bot.state_dispenser, message.peer_id)
         await message.answer("❌ Операция отменена.", keyboard=get_main_keyboard())
 
-    # ===== Кнопки уведомлений (динамический текст) =====
-    @labeler.message(text_startswith="💰 Баланс:")
-    async def btn_toggle_balance(message: Message):
-        user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
-        new_status = not user_config.enabled
-        await create_or_update_user(message.peer_id, enabled=new_status)
-        await message.answer(f"🔔 Уведомления о балансе: {'✅ включены' if new_status else '❌ выключены'}", 
-                           keyboard=get_notification_keyboard(await get_user(message.peer_id)))
-
-    @labeler.message(text_startswith="⭐ Оценки:")
-    async def btn_toggle_marks(message: Message):
-        user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
-        new_status = not user_config.marks_enabled
-        await create_or_update_user(message.peer_id, marks_enabled=new_status)
-        await message.answer(f"🔔 Уведомления об оценках: {'✅ включены' if new_status else '❌ выключены'}", 
-                           keyboard=get_notification_keyboard(await get_user(message.peer_id)))
-
     # ===== Кнопка Назад =====
     @labeler.message(text="◀️ Назад")
     async def btn_back(message: Message):
@@ -846,12 +829,32 @@ def main() -> None:
 
     # ===== Обработчик ВСЕХ сообщений (регистрируется ПОСЛЕДНИМ!) =====
     # Он нужен для FSM (состояний ввода логина/пароля и т.д.)
+    # А также для кнопок с динамическим текстом (уведомления)
     @labeler.message()
     async def handle_all_messages(message: Message):
-        current_state = await get_user_state(bot.state_dispenser, message.peer_id)
         text = message.text.strip() if message.text else ""
         
-        # Если нет состояния - ничего не делаем (кнопки уже обработаны выше)
+        # ===== Кнопки уведомлений (обрабатываются БЕЗ состояния) =====
+        if text.startswith("💰 Баланс:"):
+            user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
+            new_status = not user_config.enabled
+            await create_or_update_user(message.peer_id, enabled=new_status)
+            await message.answer(f"🔔 Уведомления о балансе: {'✅ включены' if new_status else '❌ выключены'}", 
+                               keyboard=get_notification_keyboard(await get_user(message.peer_id)))
+            return
+
+        if text.startswith("⭐ Оценки:"):
+            user_config = await get_user(message.peer_id) or await create_or_update_user(message.peer_id)
+            new_status = not user_config.marks_enabled
+            await create_or_update_user(message.peer_id, marks_enabled=new_status)
+            await message.answer(f"🔔 Уведомления об оценках: {'✅ включены' if new_status else '❌ выключены'}", 
+                               keyboard=get_notification_keyboard(await get_user(message.peer_id)))
+            return
+        
+        # ===== Далее - обработка состояний FSM =====
+        current_state = await get_user_state(bot.state_dispenser, message.peer_id)
+        
+        # Если нет состояния - ничего не делаем
         if not current_state:
             return
 
