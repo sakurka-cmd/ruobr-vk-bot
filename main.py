@@ -159,7 +159,6 @@ class StatusMessage:
 
 
 async def send_status(message: Message, text: str = "🔄 Загрузка...") -> StatusMessage:
-    """Отправить статусное сообщение с возможностью редактирования"""
     result = await message.answer(text)
     msg_id = 0
     if result:
@@ -203,8 +202,7 @@ async def show_classmates(message: Message, login: str, password: str, child_ind
         children = await get_children_async(login, password)
         current_child = children[child_index] if children and child_index < len(children) else None
         if current_child:
-            child_as_classmate = type('Classmate', (), {
-                'last_name': current_child.last_name, 'first_name': current_child.first_name,
+            child_as_classmate = type('Classmate', (),                'last_name': current_child.last_name, 'first_name': current_child.first_name,
                 'middle_name': current_child.middle_name, 'birth_date': current_child.birth_date,
                 'gender': current_child.gender, 'full_name': current_child.full_name,
                 'gender_icon': current_child.gender_icon
@@ -694,8 +692,8 @@ def main() -> None:
                 if info and info.visits:
                     for visit in info.visits:
                         if visit.get("date") == today_str and (visit.get("ordered") or visit.get("state") == 30):
-                            found = True
-                            lines.append(format_food_visit(visit, child.full_name))
+                        found = True
+                        lines.append(format_food_visit(visit, child.full_name))
             await status_msg.edit(truncate_text("\n".join(lines)) if found else f"ℹ️ На сегодня питания не найдено.")
         except Exception as e:
             await status_msg.edit(f"❌ Ошибка: {e}")
@@ -949,7 +947,7 @@ def main() -> None:
             await message.answer(f"🔔 Оценки: {'✅ включено' if new_status else '❌ выключено'}", keyboard=get_notification_keyboard(await get_user(message.peer_id)))
             return
 
-    # ===== Запуск =====
+    # ===== Запуск бота =====
     async def on_startup():
         await db_pool.initialize()
         logger.info("Database initialized")
