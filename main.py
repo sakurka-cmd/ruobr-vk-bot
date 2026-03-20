@@ -350,12 +350,13 @@ def main() -> None:
         await message.answer("🔐 Настройка учётных данных\n\nВведите логин от cabinet.ruobr.ru:\n\n❌ Отмена — для выхода", keyboard=get_cancel_keyboard())
 
     # ===== Обработчик всех сообщений (для FSM) =====
-    @labeler.message(blocking=False)
+    @labeler.message()
     async def handle_all_messages(message: Message):
         current_state = await get_user_state(bot.state_dispenser, message.peer_id)
         text = message.text.strip() if message.text else ""
+        logger.info(f"Message: '{text}', state: {current_state}")
         
-        # Если нет состояния - пропускаем, чтобы сработали специфичные обработчики
+        # Если нет состояния - пропускаем
         if not current_state:
             return
 
